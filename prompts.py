@@ -633,7 +633,6 @@ Based on the features identified in planning and insights from six hats analysis
 - Include main.py, config files, utility files as appropriate
 
 ## Response Format
-Return JSON with:
 - deliberation: Detailed reasoning for the ranking decisions, considering dependencies, critical path, file impacts, and strategic insights
 - ranked: Array of objects with rank, title, utility, effort, and affected_files for each feature
 
@@ -690,7 +689,6 @@ Based on the paper methodology, strategic analysis, and dependency ranking above
 - Prioritize high-ranked features in the class and component design
 
 ## Response Format
-Return as JSON with:
 - class_diagram: Complete mermaid classDiagram with classes, attributes, methods, relationships
 - component_diagram: Mermaid graph showing components and their connections
 - key_classes: Array of objects with class_name, purpose, key_methods, key_attributes
@@ -783,7 +781,6 @@ Based on the paper analysis, strategic insights, dependency ranking, and UML des
 - Prioritize high-ranked features in file organization
 
 ## Response Format
-Return as JSON with:
 - implementation_approach: Technical approach incorporating UML design, strategic insights, and dependency priorities
 - file_list: List of Python files needed (based on UML components and dependency ranking, always include main.py)
 - data_structures_and_interfaces: Detailed interfaces based on UML class relationships
@@ -842,7 +839,6 @@ Based on all the analysis above, create a detailed task breakdown that incorpora
   - **effort**: high/medium/low from dependency analysis
 
 ## Response Format
-Return as JSON with:
 - required_packages: Python packages needed (e.g., 'torch>=1.9.0', 'transformers>=4.0.0')
 - required_other_language_third_party_packages: Non-Python dependencies or ["No third-party dependencies required"]
 - logic_analysis: Array of [filename, detailed_description] pairs explaining what each file should implement
@@ -1007,7 +1003,6 @@ DO NOT fabricate values - only use what is explicitly mentioned in the paper.
 - Include comments explaining parameter sources
 
 ## Response Format
-Return as JSON with:
 - config_yaml: Complete YAML configuration as a string
 - parameter_sources: Explanation of where each parameter came from
 - missing_parameters: List of parameters not specified in paper that need tuning"""
@@ -1210,7 +1205,6 @@ Implement **{todo_file_name}** based on the research paper, UML structure, archi
 
 ## Response Requirements
 
-Provide a structured JSON response with:
 
 ### deliberation
 Your reasoning process for implementing this file:
