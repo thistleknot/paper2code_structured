@@ -31,32 +31,9 @@ class StreamMonitor:
     
     def _detect_repetition(self) -> bool:
         """Aggressive repetition detection"""
-        text = self.content_buffer.lower()
-        
-        # Check for obvious repetitive phrases
-        repetitive_phrases = [
-            "dynamically generate",
-            "real time", 
-            "function calls such as",
-            "without the need for",
-            "further fine-tuning",
-            "data pre- and post- processing"
-        ]
-        
-        for phrase in repetitive_phrases:
-            if text.count(phrase) > 3:
-                return True
-        
-        # Check for repeated words
-        words = text.split()
-        if len(words) > 20:
-            word_counts = {}
-            for word in words[-20:]:  # Check last 20 words
-                word_counts[word] = word_counts.get(word, 0) + 1
-                if word_counts[word] > 5:  # Same word 5+ times in 20 words
-                    return True
         
         return False
+        
 def format_dict_as_yaml_style(data: Dict[str, Any], token_name: str, indent_level: int = 0) -> str:
     """Convert dictionary to token-wrapped YAML-style indented format without braces and colons"""
     if not data:
@@ -106,13 +83,27 @@ def _format_nested_dict(data: Dict[str, Any], indent_level: int) -> str:
     return "\n".join(lines)
 
 def parse_structured_response(response_content: str) -> Dict[str, Any]:
-    """Parse structured JSON response from API"""
+    """Parse structured JSON response from API using json-repair for robust parsing"""
+    from json_repair import repair_json
+    
     try:
+        # First try standard JSON parsing
         return json.loads(response_content)
     except json.JSONDecodeError as e:
-        print(f"Failed to parse JSON response: {e}")
-        print(f"Response content: {response_content}")
-        raise
+        print(f"⚠️ Standard JSON parse failed: {e}")
+        print("🔧 Attempting JSON repair...")
+        
+        try:
+            # Use json-repair to fix malformed JSON
+            repaired_json = repair_json(response_content)
+            result = json.loads(repaired_json)
+            print("✅ JSON repair successful!")
+            return result
+        except Exception as repair_error:
+            print(f"❌ JSON repair also failed: {repair_error}")
+            print(f"First 200 chars: {repr(response_content[:200])}")
+            print(f"Last 200 chars: {repr(response_content[-200:])}")
+            raise
 
 def load_paper_content(paper_path: str) -> str:
     """Load paper content from markdown file"""
@@ -399,8 +390,8 @@ class PlanningPipeline:
             ("planning", reasoning_model, True),
             ("six_hats", reasoning_model, True),
             ("dependency", reasoning_model, True),
-            ("uml", reasoning_model, True),
             ("architecture", reasoning_model, True),
+            ("context_code_structure", reasoning_model, True),
             ("task_list", reasoning_model, True),
             ("config", coding_model, True)
         ]
@@ -562,8 +553,8 @@ class ArtifactManager:
                 "planning": reasoning_model,
                 "six_hats": reasoning_model,
                 "dependency": reasoning_model,
-                "uml": reasoning_model,
                 "architecture": reasoning_model, 
+                "context_code_structure": reasoning_model,
                 "task_list": reasoning_model,
                 "analysis": reasoning_model,
                 "config": coding_model

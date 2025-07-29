@@ -14,3 +14,4 @@ from autogen.cache import Cache
 import tempfile
 import subprocess
 import sys
+from json_repair import repair_json
