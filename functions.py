@@ -125,10 +125,9 @@ def load_paper_content(paper_path: str) -> str:
         print(f"Error reading paper file: {e}")
         raise
 
-# 3. Add resume flag to setup_argument_parser:
 def setup_argument_parser() -> argparse.ArgumentParser:
-    """Set up command line argument parser"""
-    parser = argparse.ArgumentParser(description="Code generation pipeline")
+    """Set up command line argument parser with enhanced resume options"""
+    parser = argparse.ArgumentParser(description="Code generation pipeline with resume capability")
     
     parser.add_argument('--paper_name', type=str, required=True)
     parser.add_argument('--reasoning_model', type=str, 
@@ -146,10 +145,61 @@ def setup_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument('--timeout', type=int, default=600,
                        help='Request timeout for code generation')
     parser.add_argument('--seed', type=int, default=42)
+    
+    # Enhanced resume options
     parser.add_argument('--resume_from_analysis', action='store_true',
-                       help='Skip planning and analysis phases if data exists')
+                       help='Skip planning and resume from analysis phase if data exists')
+    parser.add_argument('--resume_from_coding', action='store_true',
+                       help='Skip to coding phase and resume from existing generated files')
+    parser.add_argument('--force_regenerate', action='store_true',
+                       help='Force regeneration of all files (ignore existing generated files)')
     
     return parser
+
+def check_pipeline_state(output_dir: str) -> Dict[str, bool]:
+    """Check what pipeline phases have been completed"""
+    state = {
+        'planning_complete': False,
+        'analysis_complete': False,
+        'file_organization_complete': False,
+        'coding_started': False
+    }
+    
+    # Check planning completion
+    planning_files = [
+        f"{output_dir}/all_structured_responses.json",
+        f"{output_dir}/planning_config.yaml"
+    ]
+    state['planning_complete'] = all(os.path.exists(f) for f in planning_files)
+    
+    # Check analysis completion
+    if state['planning_complete']:
+        try:
+            with open(f"{output_dir}/all_structured_responses.json") as f:
+                structured_responses = json.load(f)
+            
+            artifact_manager = ArtifactManager(output_dir)
+            task_list = artifact_manager.get_task_list_from_responses(structured_responses)
+            state['analysis_complete'] = artifact_manager.check_analysis_completion(task_list)
+        except:
+            state['analysis_complete'] = False
+    
+    # Check file organization completion
+    state['file_organization_complete'] = os.path.exists(f"{output_dir}/file_organization_structured.json")
+    
+    # Check if any coding has started
+    coding_dirs = [
+        f"{output_dir}/structured_code_responses",
+        f"{output_dir}/diffs",
+        f"{output_dir}/coding_artifacts"
+    ]
+    state['coding_started'] = any(
+        os.path.exists(d) and os.listdir(d) 
+        for d in coding_dirs 
+        if os.path.exists(d)
+    )
+    
+    return state
 
 def print_response(response: Dict[str, Any]) -> None:
     """Print formatted response for debugging"""
@@ -186,9 +236,9 @@ class APIClient:
         
         # Generation settings rotation for all attempts
         self.generation_settings = [
-            {"name": "balanced", "temperature": 0.33, "top_p": 0.92, "repeat_penalty": 1.3, "presence_penalty": 1.1, "top_k": 55},
-            {"name": "precise", "temperature": 0.13, "top_p": 0.78, "repeat_penalty": 1.3, "presence_penalty": 1.1, "top_k": 34},
-            {"name": "creative", "temperature": 0.45, "top_p": 0.95, "repeat_penalty": 1.3, "presence_penalty": 1.1, "top_k": 66}
+            {"name": "balanced", "temperature": 0.33, "top_p": 0.92, "repeat_penalty": 1.3, "frequency_pnelaty": 1.3, "presence_penalty": 1.1, "top_k": 55},
+            {"name": "precise", "temperature": 0.13, "top_p": 0.78, "repeat_penalty": 1.3, "frequency_pnelaty": 1.3, "presence_penalty": 1.1, "top_k": 34},
+            {"name": "creative", "temperature": 0.45, "top_p": 0.95, "repeat_penalty": 1.3, "frequency_pnelaty": 1.3, "presence_penalty": 1.1, "top_k": 66}
         ]
         self.current_setting_index = 0
     
@@ -280,7 +330,7 @@ class APIClient:
                             continue
                         else:
                             print("⚠️  Returning invalid JSON after max retries")
-                
+                """
                 # Check repetition for ALL responses
                 if self._has_repetition(content):
                     print(f"⚠️  Detected repetition in response, retrying with different settings...")
@@ -288,7 +338,7 @@ class APIClient:
                         continue
                     else:
                         print(f"⚠️  Max retries reached, using response with repetition")
-                
+                """
                 print(f"✅ Success with {setting_name}")
                 return result
                             
