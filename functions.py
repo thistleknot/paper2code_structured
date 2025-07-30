@@ -91,6 +91,28 @@ def parse_structured_response(response_content: str) -> Dict[str, Any]:
         print(f"Response content: {response_content}")
         raise
 
+    """Parse structured JSON response from API using json-repair for robust parsing"""
+    from json_repair import repair_json
+    
+    try:
+        # First try standard JSON parsing
+        return json.loads(response_content)
+    except json.JSONDecodeError as e:
+        print(f"⚠️ Standard JSON parse failed: {e}")
+        print("🔧 Attempting JSON repair...")
+        
+        try:
+            # Use json-repair to fix malformed JSON
+            repaired_json = repair_json(response_content)
+            result = json.loads(repaired_json)
+            print("✅ JSON repair successful!")
+            return result
+        except Exception as repair_error:
+            print(f"❌ JSON repair also failed: {repair_error}")
+            print(f"First 200 chars: {repr(response_content[:200])}")
+            print(f"Last 200 chars: {repr(response_content[-200:])}")
+            raise
+
 def load_paper_content(paper_path: str) -> str:
     """Load paper content from markdown file"""
     try:
