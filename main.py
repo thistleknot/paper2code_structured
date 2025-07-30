@@ -629,124 +629,173 @@ def run_autogen_coding_phase(paper_content: str, output_dir: str, output_repo_di
 # 5. Updated main() function with resume capability:
 # 2. Update main() to pass timeout to APIClient constructor
 def main():
-    """Main execution function"""
+    """Main execution function with enhanced resume capability"""
     
     # Parse arguments
     parser = setup_argument_parser()
     args = parser.parse_args()
     
-    # Initialize components with timeout ONLY passed to APIClient
-    api_client = APIClient(base_url=args.api_base_url, api_key=args.api_key, 
-                          initial_seed=args.seed, default_timeout=args.timeout)  # NEW: Pass timeout here
-    pipeline = PlanningPipeline(args.reasoning_model, args.coding_model, api_client)  # NO timeout here
-    artifact_manager = ArtifactManager(args.output_dir)
+    # Check pipeline state
+    pipeline_state = check_pipeline_state(args.output_dir)
     
     print(f"\n🚀 Starting pipeline for: {args.paper_name}")
+    print(f"📁 Output directory: {args.output_dir}")
+    print(f"📊 Pipeline state:")
+    print(f"   Planning: {'✅' if pipeline_state['planning_complete'] else '❌'}")
+    print(f"   Analysis: {'✅' if pipeline_state['analysis_complete'] else '❌'}")  
+    print(f"   File Org: {'✅' if pipeline_state['file_organization_complete'] else '❌'}")
+    print(f"   Coding:   {'🔄' if pipeline_state['coding_started'] else '❌'}")
+    
+    # Determine resume strategy
+    if args.resume_from_coding:
+        if not pipeline_state['planning_complete']:
+            print("❌ Cannot resume from coding: Planning not complete")
+            return
+        if not pipeline_state['analysis_complete']:
+            print("❌ Cannot resume from coding: Analysis not complete")
+            return
+        print("🔄 Resuming from coding phase...")
+        skip_to_coding = True
+    elif args.resume_from_analysis:
+        if not pipeline_state['planning_complete']:
+            print("❌ Cannot resume from analysis: Planning not complete")
+            return
+        print("🔄 Resuming from analysis phase...")
+        skip_to_coding = False
+    else:
+        # Auto-detect resume point
+        if pipeline_state['planning_complete'] and pipeline_state['analysis_complete']:
+            print("🔄 Auto-resume: Planning and analysis complete, resuming from coding...")
+            skip_to_coding = True
+        elif pipeline_state['planning_complete']:
+            print("🔄 Auto-resume: Planning complete, resuming from analysis...")
+            skip_to_coding = False
+        else:
+            print("🆕 Starting fresh pipeline...")
+            skip_to_coding = False
+    
+    # Initialize components
+    api_client = APIClient(base_url=args.api_base_url, api_key=args.api_key, 
+                          initial_seed=args.seed, default_timeout=args.timeout)
+    pipeline = PlanningPipeline(args.reasoning_model, args.coding_model, api_client)
+    artifact_manager = ArtifactManager(args.output_dir)
+    
     print(f"Reasoning model: {args.reasoning_model}")
     print(f"Coding model: {args.coding_model}")
-    print(f"API timeout: {args.timeout}s")  # NEW: Show timeout
+    print(f"API timeout: {args.timeout}s")
     print(f"Max parallel tasks: {args.max_parallel}")
-    print(f"Output directory: {args.output_dir}")
     print(f"Repository directory: {args.output_repo_dir}")
     print(f"Initial seed: {args.seed}")
-    print(f"Resume from analysis: {args.resume_from_analysis}")
-    
-    # Rest of main() remains exactly the same - no timeout parameters passed anywhere else
+    print(f"Force regenerate: {args.force_regenerate}")
     
     # Load paper content
     print(f"\n📄 Loading paper from: {args.paper_markdown_path}")
     paper_content = load_paper_content(args.paper_markdown_path)
     
-    # Check resume conditions
-    if args.resume_from_analysis:
-        print(f"\n🔄 Checking resume conditions...")
-        
-        # Check if structured responses exist
-        structured_responses = artifact_manager.load_structured_responses()
-        if not structured_responses:
-            print("   ❌ No structured responses found, running full pipeline")
-            args.resume_from_analysis = False
-        else:
-            # Check if analysis is complete
-            task_list = artifact_manager.get_task_list_from_responses(structured_responses)
-            if not artifact_manager.check_analysis_completion(task_list):
-                print("   ⚠️  Analysis incomplete, resuming from analysis phase")
-                # Run analysis phase only
-                run_analysis_phase(paper_content, structured_responses, pipeline, artifact_manager)
-            else:
-                print("   ✅ Analysis complete, skipping to coding phase")
-    
-    # Run pipeline phases based on resume state
-    if not args.resume_from_analysis:
-        # Run planning phase
-        structured_responses = run_planning_phase(paper_content, pipeline, artifact_manager)
-        
-        # Run analysis phase
-        run_analysis_phase(paper_content, structured_responses, pipeline, artifact_manager)
-    else:
+    # Execute pipeline phases based on resume state
+    if skip_to_coding:
         # Load existing structured responses
         structured_responses = artifact_manager.load_structured_responses()
         print(f"📂 Loaded existing structured responses: {list(structured_responses.keys())}")
-    
-    # Run file organization phase
-    file_org_data = run_file_organization_phase(structured_responses, pipeline, artifact_manager)
-    
-    
-    # Run coding phase with organized file order
-    results = run_coding_phase(
-        paper_content=paper_content,
-        output_dir=args.output_dir,
-        output_repo_dir=args.output_repo_dir,
-        api_client=api_client,
-        coding_model=args.coding_model,
-        max_parallel=args.max_parallel,
-        development_order=file_org_data.get('development_order', [])  # NEW: Pass development order
-    )
-    """
         
-    results = run_autogen_coding_phase(
-        paper_content=paper_content,
-        output_dir=args.output_dir,
-        output_repo_dir=args.output_repo_dir,
-        api_client=api_client,
-        coding_model=args.coding_model,
-        development_order=file_org_data.get('development_order', []),
-        cache_seed=args.seed
-    )
-    """
-    # Final summary
-    successful = [r for r in results if r['success']]
-    failed = [r for r in results if not r['success']]
+        # Load or run file organization
+        if pipeline_state['file_organization_complete']:
+            with open(f"{args.output_dir}/file_organization_structured.json", 'r') as f:
+                file_org_data = json.load(f)
+            print("📂 Loaded existing file organization")
+        else:
+            print("🔄 Running file organization phase...")
+            file_org_data = run_file_organization_phase(structured_responses, pipeline, artifact_manager)
+        
+    else:
+        # Run planning phase if needed
+        if not pipeline_state['planning_complete']:
+            structured_responses = run_planning_phase(paper_content, pipeline, artifact_manager)
+        else:
+            structured_responses = artifact_manager.load_structured_responses()
+            print(f"📂 Loaded existing structured responses: {list(structured_responses.keys())}")
+        
+        # Run analysis phase if needed
+        if not pipeline_state['analysis_complete']:
+            run_analysis_phase(paper_content, structured_responses, pipeline, artifact_manager)
+        else:
+            print("📂 Analysis already complete, skipping...")
+        
+        # Run file organization phase
+        if pipeline_state['file_organization_complete']:
+            with open(f"{args.output_dir}/file_organization_structured.json", 'r') as f:
+                file_org_data = json.load(f)
+            print("📂 Loaded existing file organization")
+        else:
+            file_org_data = run_file_organization_phase(structured_responses, pipeline, artifact_manager)
     
-    print(f"\n" + "="*60)
-    print("✅ Complete pipeline finished!")
-    print(f"📊 Final Results: {len(successful)} successful, {len(failed)} failed")
-    print(f"📁 All artifacts saved to: {args.output_dir}")
+    # Run coding phase with resume capability
+    print(f"\n{'='*60}")
+    print("💻 CODING PHASE WITH RESUME CAPABILITY")
+    print(f"{'='*60}")
     
-    print("\n📋 Generated artifacts:")
-    if not args.resume_from_analysis:
-        print("- Planning phase: planning_response.json & planning_structured.json")
-        print("- Six hats: six_hats_response.json & six_hats_structured.json") 
-        print("- Dependency: dependency_response.json & dependency_structured.json")
-        print("- UML: uml_response.json & uml_structured.json")
-        print("- Architecture: architecture_response.json & architecture_structured.json")
-        print("- Task list: task_list_response.json & task_list_structured.json")
-        print("- Config: config_response.json & config_structured.json")
-        print("- planning_config.yaml")
-        print("- planning_trajectories.json")
-        print("- model_config.json")
-        print("- all_structured_responses.json")
+    if args.force_regenerate:
+        print("⚠️  Force regenerate enabled - will overwrite existing files")
+        # Clear existing generated files
+        for dir_name in ['structured_code_responses', 'diffs', 'coding_artifacts']:
+            dir_path = f"{args.output_dir}/{dir_name}"
+            if os.path.exists(dir_path):
+                shutil.rmtree(dir_path)
+                os.makedirs(dir_path, exist_ok=True)
+        
+        # Clear repository directory
+        if os.path.exists(args.output_repo_dir):
+            for file in os.listdir(args.output_repo_dir):
+                if file.endswith('.py'):
+                    os.remove(f"{args.output_repo_dir}/{file}")
     
-    print("- Individual analysis files for each task")
-    print("- Structured code responses in /structured_code_responses/")
-    print("- Deliberation and utility files in /coding_artifacts/")
-    print(f"- coding_results.json")
-    
-    if successful:
-        print(f"\n🎯 Generated {len(successful)} files with utilities:")
-        for result in successful:
-            utility = result.get('utility', 'No utility description')
-            print(f"   {result['filename']}: {utility[:60]}{'...' if len(utility) > 60 else ''}")
+    try:
+        results = run_coding_phase(
+            paper_content=paper_content,
+            output_dir=args.output_dir,
+            output_repo_dir=args.output_repo_dir,
+            api_client=api_client,
+            coding_model=args.coding_model,
+            max_parallel=args.max_parallel,
+            development_order=file_org_data.get('development_order', [])
+        )
+        
+        # Final summary
+        successful = [r for r in results if r['success']]
+        failed = [r for r in results if not r['success']]
+        resumed = [r for r in results if r.get('resumed', False)]
+        
+        print(f"\n" + "="*60)
+        print("✅ Complete pipeline finished!")
+        print(f"📊 Final Results:")
+        print(f"   Total files: {len(results)}")
+        print(f"   Successful: {len(successful)}")
+        print(f"   Failed: {len(failed)}")
+        if resumed:
+            print(f"   Resumed: {len(resumed)}")
+        print(f"📁 All artifacts saved to: {args.output_dir}")
+        
+        if successful:
+            print(f"\n✅ Generated files:")
+            for result in successful:
+                status = "📂" if result.get('resumed', False) else "✨"
+                print(f"   {status} {result['filename']}")
+        
+        if failed:
+            print(f"\n❌ Failed files:")
+            for result in failed:
+                print(f"   - {result['filename']}: {result.get('error', 'Unknown error')}")
+        
+        print(f"\n💡 Next time you can resume with:")
+        print(f"   --resume_from_coding    # Resume only coding phase")
+        print(f"   --force_regenerate      # Force regenerate all files")
+        
+    except KeyboardInterrupt:
+        print(f"\n\n⚠️  Pipeline interrupted by user (Ctrl-C)")
+        print(f"💡 To resume where you left off, run the exact same command:")
+        print(f"   The system will automatically detect completed files and skip them.")
+        print(f"   Completed files are saved and will be loaded as context for remaining files.")
+
 
 
 if __name__ == "__main__":

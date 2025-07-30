@@ -1,20 +1,18 @@
-# 📄 paper2code_structured: Structured Code Generation from Scientific Papers
-
-![PaperCoder Overview](./assets/papercoder_overview.png)
+# 📄 Enhanced PaperCoder: Structured Code Generation from Scientific Papers
 
 📄 **Original work:** [Paper2Code on arXiv](https://arxiv.org/abs/2504.17192) | 🙏 **Credit:** [Original PaperCoder Repository](https://github.com/going-doer/Paper2Code)
 
-**paper2code_structured** is a structured multi-phase pipeline that transforms scientific papers into comprehensive code repositories. Building on the excellent foundation of the original PaperCoder work, this enhanced version introduces a systematic three-phase approach with structured outputs, dependency analysis, and file organization.
+**Enhanced PaperCoder** is a structured multi-phase pipeline that transforms scientific papers into comprehensive code repositories. Building on the excellent foundation of the original PaperCoder work, this enhanced version introduces a systematic approach with structured outputs, dependency analysis, and file organization.
 
 ## 🌟 Key Enhancements
 
 - **📋 Structured Planning Phase**: Strategic analysis with Six Thinking Hats methodology and dependency ranking
 - **🔍 Comprehensive Analysis Phase**: Individual file analysis with focused requirements
 - **📁 Smart File Organization**: Dependency-aware development ordering (utilities → classes → main)
-- **💻 Enhanced Coding Phase**: Structured code generation with diff outputs and validation
+- **💻 Enhanced Coding Phase**: Structured code generation with diff outputs and parallel processing
 - **🛠️ Flexible API Support**: Compatible with OpenAI, Ollama, and other OpenAI-compatible endpoints
-- **📊 Resume Capability**: Skip completed phases and resume from analysis or coding
-- **🤖 Future AutoGen Integration**: Multi-agent collaboration framework (commented, ready for activation)
+- **📊 Basic Resume Capability**: Skip planning phase and resume from analysis if data exists
+- **📄 PDF Support**: Use docling to convert PDFs to markdown before processing
 
 ---
 
@@ -35,55 +33,108 @@
 ### Prerequisites
 ```bash
 # Install dependencies
-pip install requests tqdm
+pip install requests tqdm json-repair
 
-# For AutoGen support (future)
-pip install pyautogen
+# For PDF to markdown conversion
+pip install docling
 ```
 
 ### Basic Usage
 ```bash
+# Convert PDF to markdown first (if needed)
+docling paper.pdf --output paper.md
+
+# Run pipeline with OpenAI-compatible API (OpenRouter, Ollama, etc.)
+export OPENROUTER_API_KEY="your-api-key"
+
 python main.py \
     --paper_name kumo \
     --paper_markdown_path kumo_relational_foundation_model.md \
-    --output_dir output \
-    --output_repo_dir repo
+    --api_base_url "https://openrouter.ai/api/v1" \
+    --api_key "$OPENROUTER_API_KEY" \
+    --reasoning_model "deepseek/deepseek-chat-v3-0324" \
+    --coding_model "qwen/qwen-2.5-coder-32b-instruct" \
+    --output_dir outputs/kumo \
+    --output_repo_dir repos/kumo
 ```
 
 ---
 
 ## 📚 Pipeline Architecture
 
-### Three-Phase Structured Pipeline
+The pipeline consists of **four main phases** with **seven internal planning stages**:
 
-#### 🎯 **Phase 1: Strategic Planning**
-Comprehensive project analysis and strategic planning:
+### 🎯 **Phase 1: Strategic Planning** (7 Internal Stages)
 
-1. **Core Planning**: Extract entities, predicates, features, and requirements
-2. **Six Thinking Hats Analysis**: Strategic evaluation from multiple perspectives
-3. **Dependency Analysis**: Priority ranking with utility/effort assessment
-4. **Code Structure Design**: Function headers, class definitions, file organization
-5. **Architecture Design**: System interfaces and data flow
-6. **Task Breakdown**: Ordered file list with metadata
-7. **Configuration Generation**: YAML config with hyperparameters
+#### Stage 1: **Core Planning** 
+**Predicates-first methodology** - actions before entities:
+- **Predicates**: Core interactions and transformations (what happens)
+- **Entities**: Components and actors (what interacts)
+- **Intent & Requirements**: Paper methodology extraction with necessary conditions
+- **Methods & Classes**: Function headers and abstract class definitions
+- **Datasets & Metrics**: Experimental setup and evaluation framework
 
-#### 🔍 **Phase 2: Individual Analysis**
-Detailed analysis for each implementation file:
+#### Stage 2: **Six Thinking Hats Analysis**
+Strategic evaluation across multiple perspectives:
+- **White Hat**: Facts and data analysis
+- **Red Hat**: Intuitive concerns and emotional responses  
+- **Black Hat**: Risk identification and mitigation strategies
+- **Yellow Hat**: Benefits and opportunities assessment
+- **Green Hat**: Creative alternatives and solutions
+- **Blue Hat**: Process control and meta-analysis
 
-- **Core Functionality**: What the file implements from the paper
-- **Implementation Strategy**: How to structure the component
-- **Technical Considerations**: Performance, error handling, dependencies
-- **Paper-Specific Requirements**: Methodology preservation details
-- **Focused Requirements**: Methods, classes, and predicate interactions
+#### Stage 3: **Dependency Analysis**
+Priority-driven feature ranking:
+- **Critical Path Detection**: High-priority features with no dependencies
+- **Utility vs Effort Matrix**: Strategic resource allocation
+- **File Impact Mapping**: Which files each feature affects
+- **Development Sequencing**: Optimal implementation order
 
-#### 📁 **Phase 3: File Organization & Coding**
-Smart development workflow with structured outputs:
+#### Stage 4: **Code Structure Design**
+YAML-style code organization (avoids LLM repetition issues):
+- **Utility Functions**: Standalone function headers and descriptions
+- **Class Headers**: Class names with initialization parameters
+- **Class Member Functions**: Method definitions and interactions
+- **Main Processing**: Execution flow and orchestration steps
+- **File Structure**: Recommended file organization and purposes
 
-1. **File Organization**: Dependency-aware ordering (utilities → classes → main)
-2. **Structured Code Generation**: Complete implementations with deliberation
-3. **Diff Output**: Clean diff files for version control
-4. **Validation**: Import checking and execution testing
-5. **Repository Creation**: Complete working codebase
+#### Stage 5: **System Architecture**
+Technical implementation framework:
+- **Data Structures & Interfaces**: API contracts and schemas
+- **Program Call Flow**: Execution sequence and dependencies
+- **Implementation Approach**: Technical strategy and patterns
+
+#### Stage 6: **Task Breakdown**
+Development-ready file specifications:
+- **Logic Analysis**: Per-file implementation requirements
+- **Metadata Tagging**: Priority, utility, effort, and critical path flags
+- **Package Dependencies**: Third-party requirements identification
+
+#### Stage 7: **Configuration Generation**
+Deployment-ready settings:
+- **YAML Configuration**: Paper-specific hyperparameters
+- **Environment Setup**: Model and training configurations
+- **Validation Parameters**: Testing and evaluation settings
+
+### 🔍 **Phase 2: Individual File Analysis**
+Detailed analysis for each file identified in planning:
+- **Core Functionality**: What each file implements from the paper
+- **Implementation Strategy**: Technical approach and design patterns
+- **Dependencies & Data Flow**: Integration with other components
+- **Focused Requirements**: Methods, classes, and interaction specifications
+
+### 📁 **Phase 3: File Organization**
+Dependency-aware development ordering:
+- **File Type Classification**: Utilities, classes, and main orchestration
+- **Priority Assessment**: Critical path and dependency mapping
+- **Development Order**: Optimal sequence (utilities → classes → main)
+
+### 💻 **Phase 4: Code Generation**
+Parallel structured code generation:
+- **Structured Implementation**: Complete code with deliberation reasoning
+- **Diff Output**: Version control ready format
+- **Parallel Processing**: Concurrent file generation with context sharing
+- **Quality Validation**: Import checks and basic functionality testing
 
 ---
 
@@ -96,77 +147,7 @@ cd enhanced-papercoder
 pip install -r requirements.txt
 ```
 
-### API Configuration
-
-#### 🥇 **Primary: Local Ollama (Recommended)**
-The pipeline is **optimized for Ollama** - leveraging its OpenAI-compatible API for seamless local inference:
-
-```bash
-# Install Ollama
-curl -fsSL https://ollama.ai/install.sh | sh
-
-# Pull recommended models
-ollama pull hf.co/unsloth/DeepSeek-R1-0528-Qwen3-8B-GGUF:DeepSeek-R1-0528-Qwen3-8B-Q6_K.gguf
-ollama pull kirito1/qwen3-coder:latest
-
-# Start Ollama (runs on http://localhost:11434 by default)
-ollama serve
-
-# Run with recommended models
-python main.py \
-    --paper_name kumo \
-    --paper_markdown_path kumo_model.md \
-    --reasoning_model "hf.co/unsloth/DeepSeek-R1-0528-Qwen3-8B-GGUF:DeepSeek-R1-0528-Qwen3-8B-Q6_K.gguf" \
-    --coding_model "kirito1/qwen3-coder:latest" \
-    --output_dir output \
-    --output_repo_dir repo
-```
-
-**Why Ollama?**
-- ✅ **Free & Private**: No API costs, data stays local
-- ✅ **Fast Setup**: OpenAI-compatible API out of the box
-- ✅ **No Rate Limits**: Generate as much as needed
-- ✅ **Optimal for Development**: Perfect for iterative paper-to-code workflows
-
-#### 🌐 **Cloud: OpenRouter (Multi-Model Access)**
-Access top-tier models through OpenRouter's unified API:
-
-```bash
-export OPENROUTER_API_KEY="your-openrouter-key"
-
-# Using Kimi K2 for both reasoning and coding
-python main.py \
-    --paper_name attention_mechanism \
-    --paper_markdown_path transformer_paper.md \
-    --api_base_url "https://openrouter.ai/api/v1" \
-    --api_key "$OPENROUTER_API_KEY" \
-    --reasoning_model "moonshotai/kimi-k2" \
-    --coding_model "moonshotai/kimi-k2" \
-    --output_dir outputs/transformer \
-    --output_repo_dir repos/transformer_repo
-```
-
-**Why OpenRouter?**
-- 🎯 **Unified API**: Access multiple providers through one interface
-- 💰 **Cost Effective**: Competitive pricing
-- 📊 **Usage Analytics**: Track costs and performance
-
-#### 🏢 **Enterprise: Direct OpenAI API**
-For organizations with direct OpenAI access:
-
-```bash
-export OPENAI_API_KEY="your-openai-key"
-
-python main.py \
-    --paper_name enterprise_project \
-    --paper_markdown_path technical_paper.md \
-    --api_base_url "https://api.openai.com/v1" \
-    --api_key "$OPENAI_API_KEY" \
-    --reasoning_model "gpt-4" \
-    --coding_model "gpt-4" \
-    --output_dir outputs/enterprise \
-    --output_repo_dir repos/enterprise_repo
-```
+The pipeline supports any OpenAI-compatible API endpoint including OpenRouter, Ollama, and direct OpenAI access.
 
 ---
 
@@ -174,45 +155,18 @@ python main.py \
 
 ### Basic Paper Processing
 ```bash
-# Default Ollama setup with recommended models
+# Convert PDF and process
+docling paper.pdf --output paper.md
+
 python main.py \
     --paper_name kumo \
-    --paper_markdown_path examples/kumo_relational_foundation_model.md \
-    --reasoning_model "hf.co/unsloth/DeepSeek-R1-0528-Qwen3-8B-GGUF:DeepSeek-R1-0528-Qwen3-8B-Q6_K.gguf" \
-    --coding_model "kirito1/qwen3-coder:latest" \
-    --output_dir outputs/kumo \
-    --output_repo_dir repos/kumo_repo
-```
-
-### With OpenRouter Cloud
-```bash
-# High-quality cloud generation via OpenRouter
-export OPENROUTER_API_KEY="your-openrouter-key"
-
-python main.py \
-    --paper_name attention_transformer \
-    --paper_markdown_path papers/attention_is_all_you_need.md \
+    --paper_markdown_path kumo_relational_foundation_model.md \
     --api_base_url "https://openrouter.ai/api/v1" \
     --api_key "$OPENROUTER_API_KEY" \
-    --reasoning_model "moonshotai/kimi-k2" \
-    --coding_model "moonshotai/kimi-k2" \
-    --output_dir outputs/transformer \
-    --output_repo_dir repos/transformer_implementation
-```
-
-### Advanced Configuration
-```bash
-# Full configuration with performance tuning
-python main.py \
-    --paper_name research_implementation \
-    --paper_markdown_path papers/research_paper.md \
-    --reasoning_model "hf.co/unsloth/DeepSeek-R1-0528-Qwen3-8B-GGUF:DeepSeek-R1-0528-Qwen3-8B-Q6_K.gguf" \
-    --coding_model "kirito1/qwen3-coder:latest" \
-    --output_dir outputs/research \
-    --output_repo_dir repos/research_repo \
-    --max_parallel 2 \
-    --timeout 600 \
-    --seed 42
+    --reasoning_model "deepseek/deepseek-chat-v3-0324" \
+    --coding_model "qwen/qwen-2.5-coder-32b-instruct" \
+    --output_dir outputs/kumo \
+    --output_repo_dir repos/kumo
 ```
 
 ### Resume from Analysis Phase
@@ -221,25 +175,19 @@ python main.py \
 python main.py \
     --paper_name kumo \
     --paper_markdown_path kumo_relational_foundation_model.md \
+    --api_base_url "https://openrouter.ai/api/v1" \
+    --api_key "$OPENROUTER_API_KEY" \
+    --reasoning_model "deepseek/deepseek-chat-v3-0324" \
+    --coding_model "qwen/qwen-2.5-coder-32b-instruct" \
     --output_dir outputs/kumo \
-    --output_repo_dir repos/kumo_repo \
+    --output_repo_dir repos/kumo \
     --resume_from_analysis
 ```
 
-### High-Quality Generation (Longer Processing)
-```bash
-# Use stronger models for better results
-python main.py \
-    --paper_name research_paper \
-    --paper_markdown_path paper.md \
-    --reasoning_model "gpt-4" \
-    --coding_model "gpt-4" \
-    --api_base_url "https://api.openai.com" \
-    --api_key "$OPENAI_API_KEY" \
-    --timeout 900 \
-    --output_dir outputs/high_quality \
-    --output_repo_dir repos/research_implementation
-```
+**Resume Logic:**
+- If planning phase is complete but analysis isn't → Resume from analysis
+- If both planning and analysis are complete → Skip directly to coding
+- Otherwise → Start from the beginning
 
 ---
 
@@ -248,55 +196,82 @@ python main.py \
 ### Complete Pipeline Outputs
 ```
 outputs/kumo/
-├── 📋 Planning Artifacts
-│   ├── planning_structured.json         # Core planning data
-│   ├── six_hats_structured.json        # Strategic analysis
-│   ├── dependency_structured.json      # Priority ranking
-│   ├── code_structure_structured.json  # Code organization
-│   ├── architecture_structured.json    # System design
-│   ├── task_list_structured.json      # File breakdown
-│   ├── config_structured.json         # Configuration
-│   ├── planning_config.yaml           # Generated config
-│   └── all_structured_responses.json  # Combined data
+├── 📋 Planning Artifacts (7 stages)
+│   ├── planning_response.json                 # Raw planning API response
+│   ├── planning_structured.json              # Core planning with predicates-first
+│   ├── six_hats_response.json                # Raw six hats API response
+│   ├── six_hats_structured.json              # Strategic analysis & risk assessment
+│   ├── dependency_response.json              # Raw dependency API response
+│   ├── dependency_structured.json            # Priority ranking with utility/effort
+│   ├── code_structure_response.json          # Raw code structure API response
+│   ├── code_structure_structured.json        # YAML-style code organization
+│   ├── architecture_response.json            # Raw architecture API response
+│   ├── architecture_structured.json          # System design & interfaces
+│   ├── task_list_response.json               # Raw task list API response
+│   ├── task_list_structured.json             # File breakdown with metadata
+│   ├── config_response.json                  # Raw config API response
+│   ├── config_structured.json                # Configuration generation
+│   ├── planning_config.yaml                  # Generated config file
+│   ├── planning_trajectories.json            # Complete conversation history
+│   ├── model_config.json                     # Model assignments per stage
+│   └── all_structured_responses.json         # Combined planning data
 │
-├── 🔍 Analysis Artifacts
-│   ├── {filename}_simple_analysis_structured.json  # Per-file analysis
-│   └── file_organization_structured.json           # Development order
+├── 🔍 Analysis & Organization Artifacts
+│   ├── {filename}_simple_analysis_response.json      # Raw per-file analysis
+│   ├── {filename}_simple_analysis_structured.json    # Structured per-file analysis
+│   ├── file_organization_response.json               # Raw file organization
+│   └── file_organization_structured.json             # Development order
 │
 ├── 💻 Coding Artifacts
-│   ├── structured_code_responses/      # Structured code outputs
-│   ├── coding_artifacts/              # Deliberation & utilities
-│   ├── diffs/                         # Version control diffs
-│   └── coding_results.json           # Summary results
+│   ├── structured_code_responses/            # Structured code with deliberation
+│   │   └── {filename}_structured.json       # Deliberation + utility + code
+│   ├── coding_artifacts/                     # Implementation reasoning
+│   │   ├── {filename}_coding.txt            # Full coding response
+│   │   └── {filename}_deliberation.txt      # Reasoning + utility
+│   ├── diffs/                               # Version control diffs
+│   │   └── {filename}.diff                  # Git-ready diff format
+│   └── coding_results.json                  # Success/failure summary
 │
-└── 📄 Repository Output
+└── 📄 Final Repository
 repos/kumo_repo/
-├── main.py                 # Entry point
-├── config.yaml            # Configuration
-├── utils/                  # Utility functions
-├── models/                 # Model implementations
-├── data/                   # Data processing
-└── evaluation/            # Evaluation scripts
+├── config.yaml                # Runtime configuration (copied from planning)
+├── main.py                    # Entry point (generated last in development order)
+├── utils/                     # Utility functions (generated first)
+│   ├── data_processing.py
+│   └── evaluation_metrics.py
+├── models/                    # Core classes (generated second)
+│   ├── transformer.py
+│   └── attention.py
+└── evaluation/               # Other components
+    └── benchmark.py
 ```
 
 ### Key Structured Outputs
 
-#### Planning Phase Results
+#### Planning Phase Results (7 JSON files)
 - **Strategic Analysis**: Six Thinking Hats evaluation with risk mitigation
 - **Dependency Ranking**: High/medium/low priority with utility/effort scores
-- **File Organization**: Development order optimized for dependencies
+- **Code Structure**: Function headers, class definitions, file organization
+- **Architecture**: System design with data flow and interfaces
+- **Task Breakdown**: File-by-file implementation requirements
 - **Configuration**: Complete YAML with paper-specific hyperparameters
 
 #### Analysis Phase Results
 - **Individual File Analysis**: Detailed implementation strategy per file
+- **Core Functionality**: What each file implements from the paper
 - **Focused Requirements**: Methods, classes, and interaction specifications
 - **Technical Considerations**: Dependencies, performance, error handling
 
+#### File Organization Results
+- **Development Order**: Utilities → Classes → Main processing
+- **File Type Classification**: Priority and dependency analysis
+- **Implementation Rationale**: Why files are ordered this way
+
 #### Coding Phase Results
 - **Structured Code**: Complete implementations with deliberation reasoning
-- **Diff Files**: Clean version control integration
-- **Validation Results**: Import checks and execution testing
-- **Development Summary**: Success/failure rates with detailed metrics
+- **Diff Files**: Clean version control integration ready for git
+- **Parallel Results**: Success/failure tracking across all files
+- **Context Sharing**: Previously implemented files available to subsequent generation
 
 ---
 
@@ -327,46 +302,39 @@ repos/kumo_repo/
 
 ### Model Recommendations
 
-#### 🚀 **Ollama Local (Recommended)**
+#### 🌐 **OpenAI-Compatible APIs**
 ```bash
-# Tested and recommended combination
---reasoning_model "hf.co/unsloth/DeepSeek-R1-0528-Qwen3-8B-GGUF:DeepSeek-R1-0528-Qwen3-8B-Q6_K.gguf"
---coding_model "kirito1/qwen3-coder:latest"
+# Current example models
+--reasoning_model "deepseek/deepseek-chat-v3-0324"     # Strategic planning
+--coding_model "qwen/qwen-2.5-coder-32b-instruct"     # Code generation
 ```
 
-#### 🌐 **OpenRouter Cloud**
-```bash
-# High-quality unified model
---reasoning_model "moonshotai/kimi-k2"
---coding_model "moonshotai/kimi-k2"
---api_base_url "https://openrouter.ai/api/v1"
-```
+### API Client Features
+- **Timeout Handling**: Configurable request timeouts with retry logic
+- **Generation Settings Rotation**: Balanced → Precise → Creative on retries
+- **Seed Management**: Deterministic generation with automatic seed incrementation
+- **Streaming Support**: Real-time response monitoring with repetition detection
 
 ---
 
-## 🤖 Future AutoGen Integration
+## 🤖 AutoGen Integration
 
-The pipeline includes ready-to-activate AutoGen multi-agent collaboration:
+AutoGen multi-agent collaboration is implemented but commented out for future use:
+- Complete implementation in `functions.py` 
+- Multi-agent approach with Engineer, Critic, CodeExecutor, Manager
+- To activate: uncomment `run_autogen_coding_phase()` in main.py
 
-```python
-# In main.py, uncomment this section for multi-agent coding:
-results = run_autogen_coding_phase(
-    paper_content=paper_content,
-    output_dir=args.output_dir,
-    output_repo_dir=args.output_repo_dir,
-    api_client=api_client,
-    coding_model=args.coding_model,
-    development_order=file_org_data.get('development_order', []),
-    cache_seed=args.seed
-)
-```
+---
 
-**AutoGen Features:**
-- **Engineer Agent**: Code implementation specialist
-- **Critic Agent**: Quality assurance and review
-- **Executor Agent**: Code validation and testing
-- **Manager Agent**: Workflow coordination
-- **Real-time Collaboration**: Iterative improvement through agent feedback
+## 📈 Performance Notes
+
+- **Planning Phase**: ~5-12 minutes (7 strategic stages)
+- **Analysis Phase**: ~1-2 minutes per file
+- **File Organization**: ~30 seconds
+- **Coding Phase**: ~3-8 minutes per file
+- **Total Time**: ~25-45 minutes for typical papers (5-15 files)
+
+**Tips**: Use `--resume_from_analysis` to skip planning when experimenting with different models.
 
 ---
 
@@ -379,21 +347,21 @@ This enhanced version builds upon the excellent foundation provided by the origi
 > 👥 **Original Authors**: Outstanding work by the Paper2Code research team
 
 ### What We Enhanced
-- **Structured Pipeline**: Systematic three-phase approach with dependency analysis
-- **API Flexibility**: Support for multiple LLM providers and local models
-- **File Organization**: Smart dependency-aware development ordering
-- **Resume Capability**: Efficient workflow with checkpoint recovery
-- **Code Quality**: Structured outputs with validation and diff generation
-- **Future-Ready**: AutoGen integration framework for multi-agent collaboration
-
-### Core Methodology Credit
-The strategic planning methodology, Six Thinking Hats analysis, and paper-to-code transformation concepts remain faithful to the original research. Our enhancements focus on engineering efficiency, structured outputs, and deployment flexibility while preserving the innovative approach of the original work.
+- **Predicates-First Methodology**: FOL logic approach - actions before entities P(S,[O])
+- **Seven-Stage Strategic Planning**: Planning → Six Hats → Dependencies → Code Structure → Architecture → Tasks → Config
+- **Smart File Organization**: Priority-driven development ordering
+- **Structured Code Generation**: Deliberation + utility + diff format for complete traceability
+- **Basic Resume Capability**: Skip planning phase when data exists
+- **AutoGen Integration**: Multi-agent collaboration framework (future direction)
 
 ---
 
-## 📈 Performance Notes
+## 🐛 Known Issues
 
-- **Planning Phase**: ~2-5 minutes depending on paper complexity
-- **Analysis Phase**: ~1-3 minutes per file
-- **Coding Phase**: ~2-10 minutes per file depending on model and complexity
-- **Total Time**: ~15-45 minutes for typical research papers (5-15 files)
+- **Resume Granularity**: Can only resume from analysis phase, not mid-coding
+- **Parallel Dependencies**: Files generated in parallel may have inter-dependencies
+- **Error Recovery**: Limited handling for malformed API responses
+
+---
+
+*Convert PDFs with docling, then transform papers into code with enhanced structured planning.*
