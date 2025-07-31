@@ -1014,8 +1014,16 @@ DO NOT fabricate values - only use what is explicitly mentioned in the paper.
 Enhanced prompts.py with CODE_SCHEMA for structured code responses
 """
 
-def get_file_organization_prompt(task_list_response: str, analysis_summaries: str) -> List[Dict]:
-    """Generate file organization prompt"""
+def get_file_organization_prompt(paper_content: str, task_list_context: str, 
+                                task_list_response: str, analysis_summaries: str) -> List[Dict]:
+    """Generate file organization prompt
+    
+    Args:
+        paper_content: Original paper content (unused for this stage)
+        task_list_context: Formatted task list context from dependencies (unused)
+        task_list_response: The actual task list response data
+        analysis_summaries: Analysis summaries for all files
+    """
     
     return [
         {
@@ -1107,15 +1115,27 @@ Create an optimal development workflow that builds from foundation up."""
         }
     ]
 
-
-
 # Updated coding prompt to use structured output
 def get_coding_prompt(todo_file_name: str, detailed_logic_analysis: str,
                      utility_description: str, paper_content: str, config_yaml: str, 
-                     context_plan: str, context_six_hats: str, 
-                     context_architecture: str, context_code_structure: str, context_tasks: str,  # CHANGED: context_uml -> context_code_structure
-                     code_files: str = "") -> List[Dict]:
-    """Generate structured coding prompt for a specific file"""
+                     shared_context: Dict[str, str], code_files: str = "") -> List[Dict]:
+    """Generate structured coding prompt for a specific file using all available context"""
+    
+    # Build context sections dynamically from whatever is available
+    context_sections = []
+    
+    # Add all context sections that exist
+    for key, value in shared_context.items():
+        if key.startswith('context_') and value.strip():
+            # Convert context key to readable section name
+            section_name = key.replace('context_', '').replace('_', ' ').title()
+            context_sections.append(f"""## {section_name}
+{value}
+
+-----""")
+    
+    # Join all context sections
+    all_context = "\n".join(context_sections)
     
     return [
         {
@@ -1157,30 +1177,7 @@ Response format:
 
 -----
 
-## Implementation Plan
-{context_plan}
-
------
-
-## Strategic Analysis (Six Thinking Hats)
-{context_six_hats}
-
------
-
-## UML Design
-{context_code_structure}
-
------
-
-## Software Architecture
-{context_architecture}
-
------
-
-## Task Breakdown
-{context_tasks}
-
------
+{all_context}
 
 ## Configuration
 ```yaml
@@ -1201,7 +1198,7 @@ Response format:
 
 # Implementation Task
 
-Implement **{todo_file_name}** based on the research paper, UML structure, architecture design, and detailed analysis above.
+Implement **{todo_file_name}** based on the research paper, analysis, and context above.
 
 ## Response Requirements
 
@@ -1226,7 +1223,7 @@ Array containing:
 ## Implementation Requirements
 1. **Complete Implementation**: Write fully functional code with no placeholders
 2. **Follow Architecture**: Strictly adhere to the class/interface design specified
-3. **Follow UML Design**: Implement classes and relationships as shown in UML diagrams
+3. **Follow Design**: Implement classes and relationships as shown in the context
 4. **Paper Fidelity**: Ensure the implementation accurately reflects the research methodology
 5. **Code Quality**: 
    - Include proper docstrings and type hints
