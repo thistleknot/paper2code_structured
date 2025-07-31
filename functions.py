@@ -222,6 +222,14 @@ def _format_nested_dict(data: Dict[str, Any], indent_level: int) -> str:
     return "\n".join(lines)
 
 def parse_structured_response(response_content: str) -> Dict[str, Any]:
+    """Parse structured JSON response from API"""
+    try:
+        return json.loads(response_content)
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse JSON response: {e}")
+        print(f"Response content: {response_content}")
+        raise
+
     """Parse structured JSON response from API using json-repair for robust parsing"""
     from json_repair import repair_json
     
