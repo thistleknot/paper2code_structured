@@ -6,22 +6,22 @@ Supports parallel processing and diff-based output
 
 from imports import *
 from functions import (
-    APIClient, PlanningPipeline, ArtifactManager, CodingPipeline,
+    APIClient, PlanningPipeline, EnhancedPlanningPipeline, ArtifactManager, CodingPipeline,  # ADD EnhancedPlanningPipeline
     parse_structured_response, load_paper_content, 
     setup_argument_parser, print_response, load_context_and_analysis,
-    format_dict_as_yaml_style
+    format_dict_as_yaml_style, check_pipeline_state, build_shared_context  # ADD missing functions
 )
 from prompts import (
     PLANNING_SCHEMA, SIX_HATS_SCHEMA, DEPENDENCY_SCHEMA, ARCHITECTURE_SCHEMA, CODE_STRUCTURE_SCHEMA,
-    TASK_LIST_SCHEMA, CONFIG_SCHEMA, ANALYSIS_SCHEMA, FILE_ORGANIZATION_SCHEMA,  # NEW
+    TASK_LIST_SCHEMA, CONFIG_SCHEMA, ANALYSIS_SCHEMA, FILE_ORGANIZATION_SCHEMA,
     get_planning_prompt, get_six_hats_prompt, get_dependency_prompt, get_architecture_prompt, get_code_structure_prompt,
-    get_task_list_prompt, get_config_prompt, get_analysis_prompt, get_file_organization_prompt  # NEW
+    get_task_list_prompt, get_config_prompt, get_analysis_prompt, get_file_organization_prompt
 )
 
 
-def run_planning_phase(paper_content: str, pipeline: PlanningPipeline, 
+def run_planning_phase(paper_content: str, pipeline: EnhancedPlanningPipeline, 
                       artifact_manager: ArtifactManager) -> Dict[str, Any]:
-    """Run the complete planning phase and return structured responses"""
+    """Run the complete planning phase using configuration-driven approach"""
     
     # Check if we should resume from existing data
     structured_responses = artifact_manager.load_structured_responses()
@@ -35,179 +35,42 @@ def run_planning_phase(paper_content: str, pipeline: PlanningPipeline,
     print("📋 STARTING PLANNING PHASE")
     print("="*60)
     
-    # Track responses and trajectories
+    # Track responses
     responses = []
-    trajectories = []
     structured_responses = {}
     
-    # Stage 1: Planning
-    print("\n" + "="*60)
-    stage_name = "planning"
-    messages = get_planning_prompt(paper_content)
-    trajectories.extend(messages)
+    # Get ordered list of planning stages (excluding analysis and file_organization)
+    planning_stages = ['planning', 'six_hats', 'dependency', 'code_structure', 'architecture', 'task_list', 'config']
     
-    response = pipeline.execute_stage(stage_name, messages, True, PLANNING_SCHEMA)
-    print_response(response)
-    
-    responses.append(response)
-    trajectories.append({'role': 'assistant', 'content': response['choices'][0]['message']['content']})
-    
-    # Parse and save structured data
-    planning_data = parse_structured_response(response['choices'][0]['message']['content'])
-    structured_responses[stage_name] = planning_data
-    
-    artifact_manager.save_response(stage_name, response)
-    artifact_manager.save_structured_data(stage_name, planning_data)
-    
-    # Stage 2: Six Thinking Hats Analysis
-    print("\n" + "="*60)
-    stage_name = "six_hats"
-    messages = get_six_hats_prompt(paper_content, format_dict_as_yaml_style(planning_data, "planning"))
-    trajectories.extend(messages)
-    
-    response = pipeline.execute_stage(stage_name, messages, True, SIX_HATS_SCHEMA)
-    print_response(response)
-    
-    responses.append(response)
-    trajectories.append({'role': 'assistant', 'content': response['choices'][0]['message']['content']})
-    
-    # Parse and save structured data
-    six_hats_data = parse_structured_response(response['choices'][0]['message']['content'])
-    structured_responses[stage_name] = six_hats_data
-    
-    artifact_manager.save_response(stage_name, response)
-    artifact_manager.save_structured_data(stage_name, six_hats_data)
-    
-    # Stage 3: Dependency Analysis
-    print("\n" + "="*60)
-    stage_name = "dependency"
-    messages = get_dependency_prompt(
-        paper_content,
-        format_dict_as_yaml_style(planning_data, "planning"),
-        format_dict_as_yaml_style(six_hats_data, "six_hats")
-    )
-    trajectories.extend(messages)
-    
-    response = pipeline.execute_stage(stage_name, messages, True, DEPENDENCY_SCHEMA)
-    print_response(response)
-    
-    responses.append(response)
-    trajectories.append({'role': 'assistant', 'content': response['choices'][0]['message']['content']})
-    
-    # Parse and save structured data
-    dependency_data = parse_structured_response(response['choices'][0]['message']['content'])
-    structured_responses[stage_name] = dependency_data
-    
-    artifact_manager.save_response(stage_name, response)
-    artifact_manager.save_structured_data(stage_name, dependency_data)
+    for stage_name in planning_stages:
+        print("\n" + "="*60)
+        print(f"🔄 STAGE: {stage_name.upper()}")
+        print("="*60)
         
-    # Stage 4: Code Structure
-    print("\n" + "="*60)
-    stage_name = "code_structure"
-    messages = get_code_structure_prompt(
-        paper_content,
-        format_dict_as_yaml_style(planning_data, "planning"),
-        format_dict_as_yaml_style(six_hats_data, "six_hats"),
-        format_dict_as_yaml_style(dependency_data, "dependency")
-    )
-    trajectories.extend(messages)
-    
-    response = pipeline.execute_stage(stage_name, messages, True, CODE_STRUCTURE_SCHEMA)
-    print_response(response)
-    
-    responses.append(response)
-    trajectories.append({'role': 'assistant', 'content': response['choices'][0]['message']['content']})
-    
-    # Parse and save structured data
-    code_structure_data = parse_structured_response(response['choices'][0]['message']['content'])  # FIXED: Change uml_data to code_structure_data
-    structured_responses[stage_name] = code_structure_data  # FIXED: Change uml_data to code_structure_data
-    
-    artifact_manager.save_response(stage_name, response)
-    artifact_manager.save_structured_data(stage_name, code_structure_data)  # FIXED: Change uml_data to code_structure_data
-    
-    # Stage 5: Architecture Design
-    print("\n" + "="*60)
-    stage_name = "architecture"
-    messages = get_architecture_prompt(
-        paper_content, 
-        format_dict_as_yaml_style(planning_data, "planning"),
-        format_dict_as_yaml_style(six_hats_data, "six_hats"),
-        format_dict_as_yaml_style(dependency_data, "dependency"),
-        format_dict_as_yaml_style(code_structure_data, "code_structure")  # FIXED: Use code_structure_data
-    )
-    trajectories.extend(messages)
-    
-    response = pipeline.execute_stage(stage_name, messages, True, ARCHITECTURE_SCHEMA)
-    print_response(response)
-    
-    responses.append(response)
-    trajectories.append({'role': 'assistant', 'content': response['choices'][0]['message']['content']})
-    
-    # Parse and save structured data
-    architecture_data = parse_structured_response(response['choices'][0]['message']['content'])
-    structured_responses[stage_name] = architecture_data
-    
-    artifact_manager.save_response(stage_name, response)
-    artifact_manager.save_structured_data(stage_name, architecture_data)
-    
-    # Stage 6: Task List
-    print("\n" + "="*60)
-    stage_name = "task_list"
-    messages = get_task_list_prompt(
-        paper_content,
-        format_dict_as_yaml_style(planning_data, "planning"),
-        format_dict_as_yaml_style(six_hats_data, "six_hats"),
-        format_dict_as_yaml_style(dependency_data, "dependency"),
-        format_dict_as_yaml_style(code_structure_data, "code_structure"),  # FIXED
-        format_dict_as_yaml_style(architecture_data, "architecture")
-    )
-    trajectories.extend(messages)
-    
-    response = pipeline.execute_stage(stage_name, messages, True, TASK_LIST_SCHEMA)
-    print_response(response)
-    
-    responses.append(response)
-    trajectories.append({'role': 'assistant', 'content': response['choices'][0]['message']['content']})
-    
-    # Parse and save structured data
-    task_list_data = parse_structured_response(response['choices'][0]['message']['content'])
-    structured_responses[stage_name] = task_list_data
-    
-    artifact_manager.save_response(stage_name, response)
-    artifact_manager.save_structured_data(stage_name, task_list_data)
-    
-    # Stage 7: Configuration
-    print("\n" + "="*60)
-    stage_name = "config"
-    messages = get_config_prompt(
-        paper_content,
-        format_dict_as_yaml_style(planning_data, "planning"),
-        format_dict_as_yaml_style(six_hats_data, "six_hats"),
-        format_dict_as_yaml_style(dependency_data, "dependency"),
-        format_dict_as_yaml_style(code_structure_data, "code_structure"),  # FIXED
-        format_dict_as_yaml_style(architecture_data, "architecture"),
-        format_dict_as_yaml_style(task_list_data, "task_list")
-    )
-    trajectories.extend(messages)
-    
-    response = pipeline.execute_stage(stage_name, messages, True, CONFIG_SCHEMA)
-    print_response(response)
-    
-    responses.append(response)
-    trajectories.append({'role': 'assistant', 'content': response['choices'][0]['message']['content']})
-    
-    # Parse and save structured data
-    config_data = parse_structured_response(response['choices'][0]['message']['content'])
-    structured_responses[stage_name] = config_data
-    
-    artifact_manager.save_response(stage_name, response)
-    artifact_manager.save_structured_data(stage_name, config_data)
-    
-    # Save the YAML config file
-    artifact_manager.save_config_yaml(config_data['config_yaml'])
+        # Execute stage using configuration
+        response = pipeline.execute_stage_from_config(
+            stage_name, paper_content, structured_responses
+        )
+        print_response(response)
+        
+        # Track responses
+        responses.append(response)
+        
+        # Parse and save structured data
+        response_content = response['choices'][0]['message']['content']
+        structured_data = parse_structured_response(response_content)
+        structured_responses[stage_name] = structured_data
+        
+        # Save artifacts
+        artifact_manager.save_response(stage_name, response)
+        artifact_manager.save_structured_data(stage_name, structured_data)
+        
+        # Save YAML config if this is the config stage
+        if stage_name == 'config':
+            artifact_manager.save_config_yaml(structured_data['config_yaml'])
     
     # Save final artifacts
-    artifact_manager.save_trajectories(trajectories)
+    artifact_manager.save_trajectories(responses)
     artifact_manager.save_model_config(pipeline.reasoning_model, pipeline.coding_model)
     
     # Save combined structured responses for easy access
@@ -220,8 +83,8 @@ def run_planning_phase(paper_content: str, pipeline: PlanningPipeline,
 
 
 def run_analysis_phase(paper_content: str, structured_responses: Dict[str, Any], 
-                       pipeline: PlanningPipeline, artifact_manager: ArtifactManager) -> None:
-    """Run analysis phase iterating over task list"""
+                       pipeline: EnhancedPlanningPipeline, artifact_manager: ArtifactManager) -> None:
+    """Run analysis phase using configuration-driven approach"""
     
     print("\n" + "="*60)
     print("🔍 STARTING ANALYSIS PHASE")
@@ -245,16 +108,7 @@ def run_analysis_phase(paper_content: str, structured_responses: Dict[str, Any],
     for i, filename in enumerate(task_list, 1):
         print(f"   {i}. {filename}")
     
-    # Prepare context strings using token wrapping
-    planning_str = format_dict_as_yaml_style(structured_responses.get('planning', {}), "planning")
-    six_hats_str = format_dict_as_yaml_style(structured_responses.get('six_hats', {}), "six_hats")
-    dependency_str = format_dict_as_yaml_style(structured_responses.get('dependency', {}), "dependency")
-    architecture_str = format_dict_as_yaml_style(structured_responses.get('architecture', {}), "architecture")
-    #uml_str = format_dict_as_yaml_style(structured_responses.get('uml', {}), "uml")
-    code_structure_str = format_dict_as_yaml_style(structured_responses.get('code_structure', {}), "code_structure")  # FIXED
-    task_list_str = format_dict_as_yaml_style(structured_responses.get('task_list', {}), "task_list")
-    
-    # Process each file
+    # Process each file using configuration
     for todo_file_name in tqdm(task_list, desc="Analyzing files"):
         if todo_file_name == "config.yaml":
             continue
@@ -273,23 +127,14 @@ def run_analysis_phase(paper_content: str, structured_responses: Dict[str, Any],
         # Get file description from logic analysis
         todo_file_desc = logic_analysis_dict.get(todo_file_name, "")
         
-        # Generate analysis prompt
-        from prompts import get_analysis_prompt, ANALYSIS_SCHEMA
-        messages = get_analysis_prompt(
-            paper_content, 
-            planning_str,
-            six_hats_str, 
-            dependency_str,
-            architecture_str,
-            #uml_str,
-            code_structure_str,
-            task_list_str,
-            todo_file_name, 
-            todo_file_desc
+        # Execute analysis using configuration (with extra args for file-specific data)
+        response = pipeline.execute_stage_from_config(
+            stage_name='analysis',
+            paper_content=paper_content, 
+            structured_responses=structured_responses,
+            todo_file_name=todo_file_name, 
+            todo_file_desc=todo_file_desc
         )
-        
-        # Execute analysis
-        response = pipeline.execute_stage("analysis", messages, True, ANALYSIS_SCHEMA)
         print_response(response)
         
         # Parse and save structured data
@@ -301,10 +146,11 @@ def run_analysis_phase(paper_content: str, structured_responses: Dict[str, Any],
     
     print(f"\n✅ Analysis phase completed for {len([f for f in task_list if f != 'config.yaml'])} files")
 
+
 def run_file_organization_phase(structured_responses: Dict[str, Any], 
-                               pipeline: PlanningPipeline, 
+                               pipeline: EnhancedPlanningPipeline, 
                                artifact_manager: ArtifactManager) -> Dict[str, Any]:
-    """Run file organization phase to order files by development dependencies"""
+    """Run file organization phase using configuration-driven approach"""
     
     print("\n" + "="*60)
     print("📁 STARTING FILE ORGANIZATION PHASE")
@@ -316,10 +162,6 @@ def run_file_organization_phase(structured_responses: Dict[str, Any],
         print("📂 File organization already completed, loading existing data...")
         with open(file_org_file, 'r') as f:
             return json.load(f)
-    
-    # Get task list data
-    task_list_data = structured_responses.get('task_list', {})
-    task_list_str = format_dict_as_yaml_style(task_list_data, "task_list")
     
     # Gather analysis summaries for all files
     task_list = artifact_manager.get_task_list_from_responses(structured_responses)
@@ -347,12 +189,14 @@ Classes Focus: {', '.join(analysis_data.get('focused_requirements', {}).get('cla
     
     print(f"📋 Organizing {len([f for f in task_list if f != 'config.yaml'])} files by development order")
     
-    # Generate file organization prompt
-    from prompts import get_file_organization_prompt, FILE_ORGANIZATION_SCHEMA
-    messages = get_file_organization_prompt(task_list_str, analysis_summaries)
-    
-    # Execute file organization
-    response = pipeline.execute_stage("file_organization", messages, True, FILE_ORGANIZATION_SCHEMA)
+    # Execute file organization using configuration
+    response = pipeline.execute_stage_from_config(
+        stage_name='file_organization',
+        paper_content='',  # No paper content needed
+        structured_responses=structured_responses,
+        task_list_response=format_dict_as_yaml_style(structured_responses.get('task_list', {}), "task_list"),
+        analysis_summaries=analysis_summaries
+    )
     print_response(response)
     
     # Parse and save structured data
@@ -372,21 +216,23 @@ Classes Focus: {', '.join(analysis_data.get('focused_requirements', {}).get('cla
     
     return file_org_data
 
+
+# Update run_coding_phase() to use configuration-driven context building
+
 def run_coding_phase(paper_content: str, output_dir: str, output_repo_dir: str,
                     api_client: APIClient, coding_model: str, max_parallel: int,
-                    development_order: List[str] = None) -> List[Dict[str, Any]]:  # ADD THIS
-    """Run the coding phase with resume capability"""
+                    development_order: List[str] = None) -> List[Dict[str, Any]]:
+    """Run the coding phase with configuration-driven context building"""
     
     print("\n" + "="*60)
     print("💻 STARTING CODING PHASE")
     print("="*60)
     
-    # Check if structured responses exist
+    # Check dependencies
     if not os.path.exists(f'{output_dir}/all_structured_responses.json'):
         print("❌ No structured responses found. Run planning and analysis phases first.")
         return []
     
-    # Check if config exists
     if not os.path.exists(f'{output_dir}/planning_config.yaml'):
         print("❌ No config file found. Run planning phase first.")
         return []
@@ -395,8 +241,12 @@ def run_coding_phase(paper_content: str, output_dir: str, output_repo_dir: str,
     with open(f'{output_dir}/planning_config.yaml') as f:
         config_yaml = f.read()
     
-    # Load context and analysis 
+    # Load context and analysis using existing function
     context, detailed_logic_analysis_dict, utility_descriptions = load_context_and_analysis(output_dir)
+    
+    # Load structured responses for configuration-driven context building
+    with open(f'{output_dir}/all_structured_responses.json') as f:
+        structured_responses = json.load(f)
     
     # Use development order if provided, otherwise use original task list
     if development_order:
@@ -436,17 +286,8 @@ def run_coding_phase(paper_content: str, output_dir: str, output_repo_dir: str,
         max_parallel=max_parallel
     )
 
-    # Add this before line 384:
-    shared_context = {
-        'paper_content': paper_content,
-        'config_yaml': config_yaml,
-        'context_plan': context['context_plan'],
-        'context_six_hats': context['context_six_hats'],
-        'context_architecture': context['context_architecture'],
-        #'context_uml': context['context_uml'],
-        'context_code_structure': context['context_code_structure'],
-        'context_tasks': context['context_tasks']
-    }
+    # Build shared context using configuration-driven approach
+    shared_context = build_shared_context(structured_responses, paper_content, config_yaml, context)
     
     # Process files in parallel with structured responses
     results = coding_pipeline.process_files_parallel(file_tasks, shared_context)
@@ -491,8 +332,6 @@ def run_coding_phase(paper_content: str, output_dir: str, output_repo_dir: str,
         json.dump(results_summary, f, indent=2)
     
     return results
-
-# Add this function to your main.py (after your other phase functions)
 
 def run_autogen_coding_phase(paper_content: str, output_dir: str, output_repo_dir: str,
                             api_client: APIClient, coding_model: str, 
@@ -626,8 +465,7 @@ def run_autogen_coding_phase(paper_content: str, output_dir: str, output_repo_di
     
     return results
 
-# 5. Updated main() function with resume capability:
-# 2. Update main() to pass timeout to APIClient constructor
+# 5. Updated main() function with resume capability, to pass timeout to APIClient constructor
 def main():
     """Main execution function with enhanced resume capability"""
     
@@ -646,8 +484,8 @@ def main():
     print(f"   File Org: {'✅' if pipeline_state['file_organization_complete'] else '❌'}")
     print(f"   Coding:   {'🔄' if pipeline_state['coding_started'] else '❌'}")
     
-    # Determine resume strategy
-    if args.resume_from_coding:
+    # Enhanced resume logic using pipeline state
+    if hasattr(args, 'resume_from_coding') and args.resume_from_coding:
         if not pipeline_state['planning_complete']:
             print("❌ Cannot resume from coding: Planning not complete")
             return
@@ -663,7 +501,7 @@ def main():
         print("🔄 Resuming from analysis phase...")
         skip_to_coding = False
     else:
-        # Auto-detect resume point
+        # Auto-detect resume point based on pipeline state
         if pipeline_state['planning_complete'] and pipeline_state['analysis_complete']:
             print("🔄 Auto-resume: Planning and analysis complete, resuming from coding...")
             skip_to_coding = True
@@ -677,7 +515,7 @@ def main():
     # Initialize components
     api_client = APIClient(base_url=args.api_base_url, api_key=args.api_key, 
                           initial_seed=args.seed, default_timeout=args.timeout)
-    pipeline = PlanningPipeline(args.reasoning_model, args.coding_model, api_client)
+    pipeline = EnhancedPlanningPipeline(args.reasoning_model, args.coding_model, api_client)
     artifact_manager = ArtifactManager(args.output_dir)
     
     print(f"Reasoning model: {args.reasoning_model}")
@@ -686,7 +524,6 @@ def main():
     print(f"Max parallel tasks: {args.max_parallel}")
     print(f"Repository directory: {args.output_repo_dir}")
     print(f"Initial seed: {args.seed}")
-    print(f"Force regenerate: {args.force_regenerate}")
     
     # Load paper content
     print(f"\n📄 Loading paper from: {args.paper_markdown_path}")
@@ -729,12 +566,13 @@ def main():
         else:
             file_org_data = run_file_organization_phase(structured_responses, pipeline, artifact_manager)
     
-    # Run coding phase with resume capability
+    # Run coding phase with enhanced resume capability
     print(f"\n{'='*60}")
-    print("💻 CODING PHASE WITH RESUME CAPABILITY")
+    print("💻 CODING PHASE WITH FILE-LEVEL RESUME")
     print(f"{'='*60}")
     
-    if args.force_regenerate:
+    # Optional: Force regenerate (if you had this flag)
+    if hasattr(args, 'force_regenerate') and args.force_regenerate:
         print("⚠️  Force regenerate enabled - will overwrite existing files")
         # Clear existing generated files
         for dir_name in ['structured_code_responses', 'diffs', 'coding_artifacts']:
@@ -760,7 +598,7 @@ def main():
             development_order=file_org_data.get('development_order', [])
         )
         
-        # Final summary
+        # Enhanced final summary
         successful = [r for r in results if r['success']]
         failed = [r for r in results if not r['success']]
         resumed = [r for r in results if r.get('resumed', False)]
@@ -786,16 +624,15 @@ def main():
             for result in failed:
                 print(f"   - {result['filename']}: {result.get('error', 'Unknown error')}")
         
-        print(f"\n💡 Next time you can resume with:")
-        print(f"   --resume_from_coding    # Resume only coding phase")
-        print(f"   --force_regenerate      # Force regenerate all files")
+        print(f"\n💡 Resume capability:")
+        print(f"   If interrupted, rerun the same command to continue where you left off")
+        print(f"   Completed files are automatically detected and skipped")
         
     except KeyboardInterrupt:
         print(f"\n\n⚠️  Pipeline interrupted by user (Ctrl-C)")
         print(f"💡 To resume where you left off, run the exact same command:")
+        print(f"   python main.py --paper_name {args.paper_name} --paper_markdown_path {args.paper_markdown_path} --output_dir {args.output_dir} --output_repo_dir {args.output_repo_dir}")
         print(f"   The system will automatically detect completed files and skip them.")
-        print(f"   Completed files are saved and will be loaded as context for remaining files.")
-
 
 
 if __name__ == "__main__":
