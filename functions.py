@@ -4,6 +4,145 @@ Core functions and classes for the planning pipeline
 """
 
 from imports import *
+
+# Add this to functions.py
+
+class PipelineConfig:
+    """Centralized pipeline configuration and stage management"""
+    
+    # Define the pipeline stages and their dependencies
+    STAGES = {
+        'planning': {
+            'dependencies': [],
+            'schema': 'PLANNING_SCHEMA',
+            'model': 'reasoning',
+            'prompt_func': 'get_planning_prompt'
+        },
+        'six_hats': {
+            'dependencies': ['planning'],
+            'schema': 'SIX_HATS_SCHEMA', 
+            'model': 'reasoning',
+            'prompt_func': 'get_six_hats_prompt'
+        },
+        'dependency': {
+            'dependencies': ['planning', 'six_hats'],
+            'schema': 'DEPENDENCY_SCHEMA',
+            'model': 'reasoning', 
+            'prompt_func': 'get_dependency_prompt'
+        },
+        'code_structure': {
+            'dependencies': ['planning', 'six_hats', 'dependency'],
+            'schema': 'CODE_STRUCTURE_SCHEMA',
+            'model': 'reasoning',
+            'prompt_func': 'get_code_structure_prompt'
+        },
+        'architecture': {
+            'dependencies': ['planning', 'six_hats', 'dependency', 'code_structure'],
+            'schema': 'ARCHITECTURE_SCHEMA',
+            'model': 'reasoning',
+            'prompt_func': 'get_architecture_prompt'
+        },
+        'task_list': {
+            'dependencies': ['planning', 'six_hats', 'dependency', 'code_structure', 'architecture'],
+            'schema': 'TASK_LIST_SCHEMA',
+            'model': 'reasoning',
+            'prompt_func': 'get_task_list_prompt'
+        },
+        'config': {
+            'dependencies': ['planning', 'six_hats', 'dependency', 'code_structure', 'architecture', 'task_list'],
+            'schema': 'CONFIG_SCHEMA',
+            'model': 'coding',
+            'prompt_func': 'get_config_prompt'
+        },
+        'analysis': {
+            'dependencies': ['planning', 'six_hats', 'dependency', 'architecture', 'code_structure', 'task_list'],
+            'schema': 'ANALYSIS_SCHEMA',
+            'model': 'reasoning',
+            'prompt_func': 'get_analysis_prompt'
+        },
+        'file_organization': {
+            'dependencies': ['task_list'],  # Only needs task list and analysis summaries
+            'schema': 'FILE_ORGANIZATION_SCHEMA',
+            'model': 'reasoning',
+            'prompt_func': 'get_file_organization_prompt'
+        }
+    }
+    
+    @classmethod
+    def get_stage_dependencies(cls, stage_name: str) -> List[str]:
+        """Get list of stages this stage depends on"""
+        return cls.STAGES.get(stage_name, {}).get('dependencies', [])
+    
+    @classmethod
+    def get_stage_schema(cls, stage_name: str) -> str:
+        """Get schema name for stage"""
+        return cls.STAGES.get(stage_name, {}).get('schema')
+    
+    @classmethod
+    def get_stage_model(cls, stage_name: str) -> str:
+        """Get model type for stage (reasoning/coding)"""
+        return cls.STAGES.get(stage_name, {}).get('model', 'reasoning')
+    
+    @classmethod
+    def get_stage_prompt_func(cls, stage_name: str) -> str:
+        """Get prompt function name for stage"""
+        return cls.STAGES.get(stage_name, {}).get('prompt_func')
+    
+    @classmethod
+    def build_context_for_stage(cls, stage_name: str, structured_responses: Dict[str, Any]) -> Dict[str, str]:
+        """Build context dictionary for a stage based on its dependencies"""
+        context = {}
+        dependencies = cls.get_stage_dependencies(stage_name)
+        
+        for dep_stage in dependencies:
+            if dep_stage in structured_responses:
+                context[dep_stage] = format_dict_as_yaml_style(
+                    structured_responses[dep_stage], 
+                    dep_stage
+                )
+        
+        return context
+    
+    @classmethod
+    def get_prompt_args(cls, stage_name: str, paper_content: str, structured_responses: Dict[str, Any], 
+                       **extra_args) -> List:
+        """Build prompt arguments for a stage dynamically"""
+        dependencies = cls.get_stage_dependencies(stage_name)
+        context = cls.build_context_for_stage(stage_name, structured_responses)
+        
+        # Base arguments that every prompt gets
+        args = [paper_content]
+        
+        # Add dependency contexts in order
+        for dep_stage in dependencies:
+            if dep_stage in context:
+                args.append(context[dep_stage])
+        
+        # Add any extra arguments (like file_name for analysis)
+        for key, value in extra_args.items():
+            args.append(value)
+        
+        return args
+
+      
+def build_shared_context(structured_responses: Dict[str, Any], paper_content: str, 
+                        config_yaml: str, context_data: Dict[str, str]) -> Dict[str, str]:
+    """Build shared context dynamically from whatever context data is available"""
+    
+    shared_context = {
+        'paper_content': paper_content,
+        'config_yaml': config_yaml
+    }
+    
+    # Just add whatever context keys actually exist - no hardcoded mapping needed!
+    for key, value in context_data.items():
+        if key.startswith('context_'):
+            shared_context[key] = value
+            print(f"   + Added {key}")
+    
+    print(f"📋 Built shared context dynamically with {len(shared_context)} keys")
+    return shared_context
+
 class StreamMonitor:
     """External monitor that watches streaming content and can kill the stream"""
     
@@ -489,6 +628,59 @@ class PlanningPipeline:
             print(f"Error in {stage_name} stage: {e}")
             raise
 
+class EnhancedPlanningPipeline(PlanningPipeline):
+    """Enhanced pipeline that uses configuration-driven stage execution"""
+        
+    def execute_stage_from_config(self, stage_name: str, paper_content: str, 
+                                 structured_responses: Dict[str, Any], **extra_args) -> Dict[str, Any]:
+        """Execute a stage using pipeline configuration"""
+        
+        # Get stage configuration
+        model_type = PipelineConfig.get_stage_model(stage_name)
+        schema_name = PipelineConfig.get_stage_schema(stage_name)
+        prompt_func_name = PipelineConfig.get_stage_prompt_func(stage_name)
+        
+        # Import the required schema and prompt function dynamically
+        import prompts  # FIXED: Import the module directly
+        schema = getattr(prompts, schema_name) if schema_name else None
+        prompt_func = getattr(prompts, prompt_func_name)
+        
+        # Build prompt arguments dynamically
+        prompt_args = PipelineConfig.get_prompt_args(
+            stage_name, paper_content, structured_responses, **extra_args
+        )
+        
+        # Generate messages
+        messages = prompt_func(*prompt_args)
+        
+        # Execute with appropriate model
+        model = self.reasoning_model if model_type == 'reasoning' else self.coding_model
+        
+        print(f"[{stage_name.upper()}] Using {model}")
+        
+        try:
+            completion = self.api_client.chat_completion(
+                model=model,
+                messages=messages,
+                response_format=schema,
+                stream=True
+            )
+            
+            return {
+                'choices': [{
+                    'message': {
+                        'role': 'assistant',
+                        'content': completion['choices'][0]['message']['content']
+                    }
+                }],
+                'model_used': model,
+                'stage': stage_name
+            }
+            
+        except Exception as e:
+            print(f"Error in {stage_name} stage: {e}")
+            raise
+     
 
 class ArtifactManager:
     """Handles saving and loading of pipeline artifacts"""
@@ -775,7 +967,8 @@ class CodingPipeline:
                 code_lines.append(line)
         
         return '\n'.join(code_lines)
-        
+    
+    # Then update the generate_single_file call to:
     def generate_single_file(self, file_info: Tuple[str, str, str], shared_context: Dict[str, str]) -> Dict[str, Any]:
             """Generate code for a single file using structured response"""
             todo_file_name, detailed_logic_analysis, utility_description = file_info
@@ -798,7 +991,7 @@ class CodingPipeline:
 
     """
                 
-                # Generate prompt using the enhanced function
+                # Generate prompt using the enhanced function with dynamic context
                 from prompts import get_coding_prompt, CODE_SCHEMA
                 messages = get_coding_prompt(
                     todo_file_name, 
@@ -806,12 +999,7 @@ class CodingPipeline:
                     utility_description,
                     shared_context['paper_content'],
                     shared_context['config_yaml'],
-                    shared_context['context_plan'],
-                    shared_context['context_six_hats'],
-                    shared_context['context_architecture'],
-                    #shared_context['context_uml'],
-                    shared_context['context_code_structure'],
-                    shared_context['context_tasks'],
+                    shared_context,  # Pass entire context instead of individual keys
                     code_files
                 )
                 
@@ -881,50 +1069,145 @@ class CodingPipeline:
                     'error': str(e),
                     'diff_path': None
                 }
-                
+    
     def process_files_parallel(self, file_tasks: List[Tuple[str, str, str]], 
                               shared_context: Dict[str, str]) -> List[Dict[str, Any]]:
-        """Process multiple files in parallel with structured responses"""
+        """Process multiple files in parallel with structured responses and RESUME capability"""
         
-        results = []
+        print(f"\n🔄 Checking for existing generated files...")
         
-        # Process in batches
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_parallel) as executor:
-            # Submit all tasks
-            future_to_file = {
-                executor.submit(self.generate_single_file, file_info, shared_context): file_info[0]
-                for file_info in file_tasks
-            }
+        # Filter out already-completed files and load them into context
+        remaining_tasks = []
+        completed_results = []
+        
+        for file_info in file_tasks:
+            filename, detailed_logic_analysis, utility_description = file_info
             
-            # Process completed tasks with progress bar
-            with tqdm(total=len(file_tasks), desc="Generating code") as pbar:
-                for future in concurrent.futures.as_completed(future_to_file):
-                    filename = future_to_file[future]
-                    try:
-                        result = future.result()
-                        results.append(result)
-                        
-                        if result['success']:
-                            # Update shared state for subsequent files
-                            self.done_files.append(result['filename'])
-                            self.done_file_dict[result['filename']] = result['code']
-                            print(f"   ✅ Generated: {result['filename']}")
-                            print(f"      Utility: {result.get('utility', 'N/A')[:80]}{'...' if len(result.get('utility', '')) > 80 else ''}")
-                        else:
-                            print(f"   ❌ Failed: {result['filename']}")
-                            
-                    except Exception as e:
-                        print(f"   ❌ Exception for {filename}: {e}")
-                        results.append({
-                            'filename': filename,
-                            'success': False,
-                            'error': str(e),
-                            'diff_path': None
-                        })
+            # Check if file already exists in repository
+            repo_file_path = f"{self.output_repo_dir}/{filename}"
+            safe_filename = filename.replace("/", "_").replace("\\", "_")
+            
+            # Check for all required artifacts
+            structured_response_path = f"{self.output_dir}/structured_code_responses/{safe_filename}_structured.json"
+            diff_path = f"{self.output_dir}/diffs/{safe_filename}.diff"
+            coding_artifact_path = f"{self.output_dir}/coding_artifacts/{safe_filename}_coding.txt"
+            
+            if (os.path.exists(repo_file_path) and 
+                os.path.exists(structured_response_path) and 
+                os.path.exists(diff_path) and 
+                os.path.exists(coding_artifact_path)):
+                
+                print(f"   ✅ Found existing: {filename}")
+                
+                # Load existing code into context for subsequent files
+                try:
+                    with open(repo_file_path, 'r') as f:
+                        existing_code = f.read()
+                    self.done_files.append(filename)
+                    self.done_file_dict[filename] = existing_code
                     
-                    pbar.update(1)
+                    # Load existing structured data for result compatibility
+                    with open(structured_response_path, 'r') as f:
+                        structured_data = json.load(f)
+                    
+                    # Create result entry for completed file
+                    completed_results.append({
+                        'filename': filename,
+                        'success': True,
+                        'code': existing_code,
+                        'diff_path': diff_path,
+                        'utility': structured_data.get('utility', utility_description),
+                        'deliberation': structured_data.get('deliberation', 'Previously completed'),
+                        'structured_data': structured_data,
+                        'resumed': True  # Flag to indicate this was resumed
+                    })
+                    
+                except Exception as e:
+                    print(f"   ⚠️  Error loading existing {filename}: {e}")
+                    print(f"      Will regenerate...")
+                    remaining_tasks.append(file_info)
+            else:
+                remaining_tasks.append(file_info)
         
-        return results
+        if completed_results:
+            print(f"📂 Resuming: {len(completed_results)} files already completed")
+            print(f"🔄 Remaining: {len(remaining_tasks)} files to generate")
+            
+            for result in completed_results:
+                print(f"   - {result['filename']} (loaded)")
+        else:
+            print(f"🆕 Starting fresh: {len(remaining_tasks)} files to generate")
+        
+        # If no remaining tasks, return completed results
+        if not remaining_tasks:
+            print("\n✅ All files already completed!")
+            return completed_results
+        
+        # Process remaining files in parallel
+        new_results = []
+        
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_parallel) as executor:
+                # Submit only remaining tasks
+                future_to_file = {
+                    executor.submit(self.generate_single_file, file_info, shared_context): file_info[0]
+                    for file_info in remaining_tasks
+                }
+                
+                # Process completed tasks with progress bar
+                with tqdm(total=len(remaining_tasks), desc="Generating remaining code") as pbar:
+                    for future in concurrent.futures.as_completed(future_to_file):
+                        filename = future_to_file[future]
+                        try:
+                            result = future.result()
+                            new_results.append(result)
+                            
+                            if result['success']:
+                                # Update shared state for subsequent files
+                                self.done_files.append(result['filename'])
+                                self.done_file_dict[result['filename']] = result['code']
+                                print(f"   ✅ Generated: {result['filename']}")
+                                print(f"      Utility: {result.get('utility', 'N/A')[:80]}{'...' if len(result.get('utility', '')) > 80 else ''}")
+                            else:
+                                print(f"   ❌ Failed: {result['filename']}")
+                                
+                        except Exception as e:
+                            print(f"   ❌ Exception for {filename}: {e}")
+                            new_results.append({
+                                'filename': filename,
+                                'success': False,
+                                'error': str(e),
+                                'diff_path': None
+                            })
+                        
+                        pbar.update(1)
+                        
+        except KeyboardInterrupt:
+            print(f"\n⚠️  KeyboardInterrupt received!")
+            print(f"📊 Progress before interruption:")
+            print(f"   - Completed before resume: {len(completed_results)}")
+            print(f"   - Generated in this session: {len(new_results)}")
+            print(f"   - Remaining: {len(remaining_tasks) - len(new_results)}")
+            print(f"\n💡 You can resume by running the same command again.")
+            print(f"   Already completed files will be detected and skipped.")
+            
+            # Re-raise to maintain normal Ctrl-C behavior
+            raise
+        
+        # Combine completed and new results
+        all_results = completed_results + new_results
+        
+        # Print summary
+        resumed_count = len([r for r in all_results if r.get('resumed', False)])
+        new_count = len([r for r in all_results if not r.get('resumed', False)])
+        
+        if resumed_count > 0:
+            print(f"\n📊 Final Summary:")
+            print(f"   - Resumed existing: {resumed_count}")
+            print(f"   - Generated new: {new_count}")
+            print(f"   - Total: {len(all_results)}")
+        
+        return all_results
 
 
 
@@ -979,41 +1262,28 @@ def check_analysis_completion(self, task_list: List[str]) -> bool:
 
 # 2. Update the load_context_and_analysis function signature to return utility descriptions:
 def load_context_and_analysis(output_dir: str) -> Tuple[Dict[str, Any], Dict[str, str], Dict[str, str]]:
-    """Load planning context, analysis data, and utility descriptions"""
+    """Load planning context, analysis data, and utility descriptions dynamically"""
     
     # Load structured responses
     with open(f"{output_dir}/all_structured_responses.json") as f:
         structured_responses = json.load(f)
     
-    # Load planning trajectories for context
-    with open(f"{output_dir}/planning_trajectories.json") as f:
-        trajectories = json.load(f)
+    # Build context dynamically from whatever structured responses exist
+    context = {'task_list': []}  # Initialize with task_list
     
-    # Extract context from trajectories (planning, six_hats, architecture, code_structure, tasks responses)
-    context_plan = ""
-    context_six_hats = ""
-    context_architecture = ""
-    context_code_structure = ""  # CHANGED: context_uml -> context_code_structure
-    context_tasks = ""
+    # For each stage that exists, create a formatted context entry
+    for stage_name, stage_data in structured_responses.items():
+        context_key = f"context_{stage_name}"
+        # Format the structured data as YAML-style for context
+        context[context_key] = format_dict_as_yaml_style(stage_data, stage_name)
+        print(f"   + Built {context_key} from {stage_name} stage")
     
-    for i, msg in enumerate(trajectories):
-        if msg.get('role') == 'assistant':
-            if 'planning' in trajectories[i-1].get('content', '').lower():
-                context_plan = msg['content']
-            elif 'six thinking hats' in trajectories[i-1].get('content', '').lower():
-                context_six_hats = msg['content']
-            elif 'architecture' in trajectories[i-1].get('content', '').lower():
-                context_architecture = msg['content']
-            elif 'code structure' in trajectories[i-1].get('content', '').lower():  # CHANGED: 'uml' -> 'code structure'
-                context_code_structure = msg['content']  # CHANGED: context_uml -> context_code_structure
-            elif 'task' in trajectories[i-1].get('content', '').lower():
-                context_tasks = msg['content']
-    
-    # Get task list
+    # Get task list (still needed for analysis loading)
     task_list_data = structured_responses.get('task_list', {})
     task_list = task_list_data.get('task_list', [])
+    context['task_list'] = task_list
     
-    # Load analysis for each file
+    # Load analysis for each file (this part stays the same)
     detailed_logic_analysis_dict = {}
     for todo_file_name in task_list:
         if todo_file_name == "config.yaml":
@@ -1033,17 +1303,9 @@ def load_context_and_analysis(output_dir: str) -> Tuple[Dict[str, Any], Dict[str
     artifact_manager = ArtifactManager(output_dir)
     utility_descriptions = artifact_manager.get_utility_descriptions_from_analysis(task_list)
     
-    context = {
-        'context_plan': context_plan,
-        'context_six_hats': context_six_hats,
-        'context_architecture': context_architecture,
-        'context_code_structure': context_code_structure,  # CHANGED: 'context_uml' -> 'context_code_structure'
-        'context_tasks': context_tasks,
-        'task_list': task_list
-    }
+    print(f"📋 Loaded context dynamically with {len([k for k in context.keys() if k.startswith('context_')])} context stages")
     
     return context, detailed_logic_analysis_dict, utility_descriptions
-
 
 # AutoGen
 
@@ -1555,40 +1817,152 @@ Orchestrate the conversation efficiently to achieve high-quality research implem
         # Write the code file
         with open(f"{self.output_repo_dir}/{filename}", 'w') as f:
             f.write(code)
-    
+        
     def process_files_sequential(self, file_tasks: List[Tuple[str, str, str]], 
                                 shared_context: Dict[str, str]) -> List[Dict[str, Any]]:
-        """Process files sequentially using AutoGen"""
+        """Process files sequentially using AutoGen with RESUME capability"""
         
-        results = []
+        print(f"\n🔄 Checking for existing AutoGen generated files...")
         
-        print(f"\n🤖 Starting AutoGen collaborative coding for {len(file_tasks)} files")
+        # Filter out already-completed files and load them into context
+        remaining_tasks = []
+        completed_results = []
+        
+        for file_info in file_tasks:
+            filename, detailed_analysis, utility_description = file_info
+            
+            # Check if file already exists in repository
+            repo_file_path = f"{self.output_repo_dir}/{filename}"
+            safe_filename = filename.replace("/", "_").replace("\\", "_")
+            
+            # Check for all required AutoGen artifacts
+            structured_response_path = f"{self.output_dir}/structured_code_responses/{safe_filename}_structured.json"
+            diff_path = f"{self.output_dir}/diffs/{safe_filename}.diff"
+            coding_artifact_path = f"{self.output_dir}/coding_artifacts/{safe_filename}_coding.txt"
+            autogen_conversation_path = f"{self.output_dir}/autogen_artifacts/{safe_filename}_conversation.json"
+            
+            if (os.path.exists(repo_file_path) and 
+                os.path.exists(structured_response_path) and 
+                os.path.exists(diff_path) and 
+                os.path.exists(coding_artifact_path) and
+                os.path.exists(autogen_conversation_path)):
+                
+                print(f"   ✅ Found existing AutoGen: {filename}")
+                
+                # Load existing code into context for subsequent files
+                try:
+                    with open(repo_file_path, 'r') as f:
+                        existing_code = f.read()
+                    self.done_files.append(filename)
+                    self.done_file_dict[filename] = existing_code
+                    
+                    # Load existing structured data for result compatibility
+                    with open(structured_response_path, 'r') as f:
+                        structured_data = json.load(f)
+                    
+                    # Load conversation length from AutoGen artifacts
+                    conversation_length = 0
+                    try:
+                        with open(autogen_conversation_path, 'r') as f:
+                            conversation_data = json.load(f)
+                            conversation_length = len(conversation_data)
+                    except:
+                        conversation_length = 0
+                    
+                    # Create result entry for completed AutoGen file
+                    completed_results.append({
+                        'filename': filename,
+                        'success': True,
+                        'code': existing_code,
+                        'diff_path': diff_path,
+                        'conversation_length': conversation_length,
+                        'validation': {'success': True, 'note': 'Previously completed'},  # Assume success for existing
+                        'imports': {'imports_valid': True, 'note': 'Previously completed'},
+                        'utility': structured_data.get('utility', utility_description),
+                        'deliberation': structured_data.get('deliberation', 'Previously completed by AutoGen'),
+                        'structured_data': structured_data,
+                        'autogen_artifacts': autogen_conversation_path,
+                        'resumed': True  # Flag to indicate this was resumed
+                    })
+                    
+                except Exception as e:
+                    print(f"   ⚠️  Error loading existing AutoGen {filename}: {e}")
+                    print(f"      Will regenerate with AutoGen...")
+                    remaining_tasks.append(file_info)
+            else:
+                remaining_tasks.append(file_info)
+        
+        if completed_results:
+            print(f"📂 AutoGen Resuming: {len(completed_results)} files already completed")
+            print(f"🔄 AutoGen Remaining: {len(remaining_tasks)} files to generate")
+            
+            for result in completed_results:
+                print(f"   - {result['filename']} (loaded, {result['conversation_length']} msgs)")
+        else:
+            print(f"🆕 AutoGen Starting fresh: {len(remaining_tasks)} files to generate")
+        
+        # If no remaining tasks, return completed results
+        if not remaining_tasks:
+            print("\n✅ All AutoGen files already completed!")
+            return completed_results
+        
+        # Process remaining files sequentially with AutoGen
+        print(f"\n🤖 Starting AutoGen collaborative coding for {len(remaining_tasks)} remaining files")
         print("   Processing sequentially for optimal agent collaboration...")
         
-        for i, file_info in enumerate(file_tasks, 1):
-            filename, detailed_analysis, utility_description = file_info
-            print(f"\n[{i}/{len(file_tasks)}] AutoGen Processing: {filename}")
-            print(f"   Expected utility: {utility_description[:80]}{'...' if len(utility_description) > 80 else ''}")
-            
-            result = self.generate_file_with_autogen(file_info, shared_context)
-            results.append(result)
-            
-            if result['success']:
-                # Update shared state for subsequent files
-                self.done_files.append(result['filename'])
-                self.done_file_dict[result['filename']] = result['code']
-                print(f"   ✅ Success: {filename}")
-                print(f"      Conversation: {result['conversation_length']} messages")
-                print(f"      Validation: {'PASS' if result['validation']['success'] else 'FAIL'}")
-                print(f"      Imports: {'VALID' if result['imports']['imports_valid'] else 'INVALID'}")
-            else:
-                print(f"   ❌ Failed: {filename} - {result.get('error', 'Unknown error')}")
-            
-            # Brief pause between files to avoid API rate limits
-            if i < len(file_tasks):
-                time.sleep(2)
+        new_results = []
         
-        return results
+        try:
+            for i, file_info in enumerate(remaining_tasks, 1):
+                filename, detailed_analysis, utility_description = file_info
+                print(f"\n[{i}/{len(remaining_tasks)}] AutoGen Processing: {filename}")
+                print(f"   Expected utility: {utility_description[:80]}{'...' if len(utility_description) > 80 else ''}")
+                
+                result = self.generate_file_with_autogen(file_info, shared_context)
+                new_results.append(result)
+                
+                if result['success']:
+                    # Update shared state for subsequent files
+                    self.done_files.append(result['filename'])
+                    self.done_file_dict[result['filename']] = result['code']
+                    print(f"   ✅ Success: {filename}")
+                    print(f"      Conversation: {result['conversation_length']} messages")
+                    print(f"      Validation: {'PASS' if result['validation']['success'] else 'FAIL'}")
+                    print(f"      Imports: {'VALID' if result['imports']['imports_valid'] else 'INVALID'}")
+                else:
+                    print(f"   ❌ Failed: {filename} - {result.get('error', 'Unknown error')}")
+                
+                # Brief pause between files to avoid API rate limits
+                if i < len(remaining_tasks):
+                    time.sleep(2)
+                    
+        except KeyboardInterrupt:
+            print(f"\n⚠️  AutoGen KeyboardInterrupt received!")
+            print(f"📊 AutoGen Progress before interruption:")
+            print(f"   - Completed before resume: {len(completed_results)}")
+            print(f"   - Generated in this session: {len(new_results)}")
+            print(f"   - Remaining: {len(remaining_tasks) - len(new_results)}")
+            print(f"\n💡 You can resume AutoGen by running the same command again.")
+            print(f"   Already completed AutoGen files will be detected and skipped.")
+            
+            # Re-raise to maintain normal Ctrl-C behavior
+            raise
+        
+        # Combine completed and new results
+        all_results = completed_results + new_results
+        
+        # Print AutoGen summary
+        resumed_count = len([r for r in all_results if r.get('resumed', False)])
+        new_count = len([r for r in all_results if not r.get('resumed', False)])
+        
+        if resumed_count > 0:
+            print(f"\n📊 AutoGen Final Summary:")
+            print(f"   - Resumed existing: {resumed_count}")
+            print(f"   - Generated new: {new_count}")
+            print(f"   - Total: {len(all_results)}")
+            print(f"   - Total conversations: {sum(r.get('conversation_length', 0) for r in all_results)}")
+        
+        return all_results
 
 
 # Add this function to replace your existing run_coding_phase
@@ -1720,3 +2094,121 @@ def run_autogen_coding_phase(paper_content: str, output_dir: str, output_repo_di
         json.dump(results_summary, f, indent=2)
     
     return results
+    
+
+class PipelineConfig:
+    """Centralized pipeline configuration and stage management"""
+    
+    # Define the pipeline stages and their dependencies
+    STAGES = {
+        'planning': {
+            'dependencies': [],
+            'schema': 'PLANNING_SCHEMA',
+            'model': 'reasoning',
+            'prompt_func': 'get_planning_prompt'
+        },
+        'six_hats': {
+            'dependencies': ['planning'],
+            'schema': 'SIX_HATS_SCHEMA', 
+            'model': 'reasoning',
+            'prompt_func': 'get_six_hats_prompt'
+        },
+        'dependency': {
+            'dependencies': ['planning', 'six_hats'],
+            'schema': 'DEPENDENCY_SCHEMA',
+            'model': 'reasoning', 
+            'prompt_func': 'get_dependency_prompt'
+        },
+        'code_structure': {
+            'dependencies': ['planning', 'six_hats', 'dependency'],
+            'schema': 'CODE_STRUCTURE_SCHEMA',
+            'model': 'reasoning',
+            'prompt_func': 'get_code_structure_prompt'
+        },
+        'architecture': {
+            'dependencies': ['planning', 'six_hats', 'dependency', 'code_structure'],
+            'schema': 'ARCHITECTURE_SCHEMA',
+            'model': 'reasoning',
+            'prompt_func': 'get_architecture_prompt'
+        },
+        'task_list': {
+            'dependencies': ['planning', 'six_hats', 'dependency', 'code_structure', 'architecture'],
+            'schema': 'TASK_LIST_SCHEMA',
+            'model': 'reasoning',
+            'prompt_func': 'get_task_list_prompt'
+        },
+        'config': {
+            'dependencies': ['planning', 'six_hats', 'dependency', 'code_structure', 'architecture', 'task_list'],
+            'schema': 'CONFIG_SCHEMA',
+            'model': 'coding',
+            'prompt_func': 'get_config_prompt'
+        },
+        'analysis': {
+            'dependencies': ['planning', 'six_hats', 'dependency', 'architecture', 'code_structure', 'task_list'],
+            'schema': 'ANALYSIS_SCHEMA',
+            'model': 'reasoning',
+            'prompt_func': 'get_analysis_prompt'
+        },
+        'file_organization': {
+            'dependencies': ['task_list'],  # Only needs task list and analysis summaries
+            'schema': 'FILE_ORGANIZATION_SCHEMA',
+            'model': 'reasoning',
+            'prompt_func': 'get_file_organization_prompt'
+        }
+    }
+    
+    @classmethod
+    def get_stage_dependencies(cls, stage_name: str) -> List[str]:
+        """Get list of stages this stage depends on"""
+        return cls.STAGES.get(stage_name, {}).get('dependencies', [])
+    
+    @classmethod
+    def get_stage_schema(cls, stage_name: str) -> str:
+        """Get schema name for stage"""
+        return cls.STAGES.get(stage_name, {}).get('schema')
+    
+    @classmethod
+    def get_stage_model(cls, stage_name: str) -> str:
+        """Get model type for stage (reasoning/coding)"""
+        return cls.STAGES.get(stage_name, {}).get('model', 'reasoning')
+    
+    @classmethod
+    def get_stage_prompt_func(cls, stage_name: str) -> str:
+        """Get prompt function name for stage"""
+        return cls.STAGES.get(stage_name, {}).get('prompt_func')
+    
+    @classmethod
+    def build_context_for_stage(cls, stage_name: str, structured_responses: Dict[str, Any]) -> Dict[str, str]:
+        """Build context dictionary for a stage based on its dependencies"""
+        context = {}
+        dependencies = cls.get_stage_dependencies(stage_name)
+        
+        for dep_stage in dependencies:
+            if dep_stage in structured_responses:
+                context[dep_stage] = format_dict_as_yaml_style(
+                    structured_responses[dep_stage], 
+                    dep_stage
+                )
+        
+        return context
+    
+    @classmethod
+    def get_prompt_args(cls, stage_name: str, paper_content: str, structured_responses: Dict[str, Any], 
+                       **extra_args) -> List:
+        """Build prompt arguments for a stage dynamically"""
+        dependencies = cls.get_stage_dependencies(stage_name)
+        context = cls.build_context_for_stage(stage_name, structured_responses)
+        
+        # Base arguments that every prompt gets
+        args = [paper_content]
+        
+        # Add dependency contexts in order
+        for dep_stage in dependencies:
+            if dep_stage in context:
+                args.append(context[dep_stage])
+        
+        # Add any extra arguments (like file_name for analysis)
+        for key, value in extra_args.items():
+            args.append(value)
+        
+        return args

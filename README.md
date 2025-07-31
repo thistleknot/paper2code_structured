@@ -6,12 +6,12 @@
 
 ## 🌟 Key Enhancements
 
-- **📋 Structured Planning Phase**: Strategic analysis with Six Thinking Hats methodology and dependency ranking
+- **📋 Configuration-Driven Pipeline**: Automated stage dependency management with Russian nested dolls architecture
 - **🔍 Comprehensive Analysis Phase**: Individual file analysis with focused requirements
 - **📁 Smart File Organization**: Dependency-aware development ordering (utilities → classes → main)
-- **💻 Enhanced Coding Phase**: Structured code generation with diff outputs and parallel processing
+- **💻 Enhanced Coding Phase**: File-level resume capability with structured code generation and diff outputs
 - **🛠️ Flexible API Support**: Compatible with OpenAI, Ollama, and other OpenAI-compatible endpoints
-- **📊 Basic Resume Capability**: Skip planning phase and resume from analysis if data exists
+- **🔄 Advanced Resume Capability**: Resume from any phase and skip completed files automatically
 - **📄 PDF Support**: Use docling to convert PDFs to markdown before processing
 
 ---
@@ -39,6 +39,7 @@ pip install requests tqdm json-repair
 pip install docling
 ```
 
+*Convert PDFs with docling, then transform papers into code with enhanced structured planning.*
 ### Basic Usage
 ```bash
 # Convert PDF to markdown first (if needed)
@@ -47,15 +48,37 @@ docling paper.pdf --output paper.md
 # Run pipeline with OpenAI-compatible API (OpenRouter, Ollama, etc.)
 export OPENROUTER_API_KEY="your-api-key"
 
+```
+
+## 🛠️ Installation & Setup
+
+### Clone and Install
+```bash
+git clone <your-repo-url>
+cd enhanced-papercoder
+pip install -r requirements.txt
+```
+
+The pipeline supports any OpenAI-compatible API endpoint including OpenRouter, Ollama, and direct OpenAI access.
+
+---
+
+## 🚀 Usage Examples
+
+### Basic Paper Processing
+```bash
+# Convert PDF and process
+docling paper.pdf --output paper.md
+
 python main.py \
-    --paper_name kumo \
-    --paper_markdown_path kumo_relational_foundation_model.md \
+    --paper_name paper \
+    --paper_markdown_path paper.md \
     --api_base_url "https://openrouter.ai/api/v1" \
     --api_key "$OPENROUTER_API_KEY" \
     --reasoning_model "deepseek/deepseek-chat-v3-0324" \
     --coding_model "qwen/qwen-2.5-coder-32b-instruct" \
-    --output_dir outputs/kumo \
-    --output_repo_dir repos/kumo
+    --output_dir outputs/paper \
+    --output_repo_dir repos/paper
 ```
 
 ---
@@ -136,66 +159,11 @@ Parallel structured code generation:
 - **Parallel Processing**: Concurrent file generation with context sharing
 - **Quality Validation**: Import checks and basic functionality testing
 
----
-
-## 🛠️ Installation & Setup
-
-### Clone and Install
-```bash
-git clone <your-repo-url>
-cd enhanced-papercoder
-pip install -r requirements.txt
-```
-
-The pipeline supports any OpenAI-compatible API endpoint including OpenRouter, Ollama, and direct OpenAI access.
-
----
-
-## 🚀 Usage Examples
-
-### Basic Paper Processing
-```bash
-# Convert PDF and process
-docling paper.pdf --output paper.md
-
-python main.py \
-    --paper_name kumo \
-    --paper_markdown_path kumo_relational_foundation_model.md \
-    --api_base_url "https://openrouter.ai/api/v1" \
-    --api_key "$OPENROUTER_API_KEY" \
-    --reasoning_model "deepseek/deepseek-chat-v3-0324" \
-    --coding_model "qwen/qwen-2.5-coder-32b-instruct" \
-    --output_dir outputs/kumo \
-    --output_repo_dir repos/kumo
-```
-
-### Resume from Analysis Phase
-```bash
-# Skip planning if already completed
-python main.py \
-    --paper_name kumo \
-    --paper_markdown_path kumo_relational_foundation_model.md \
-    --api_base_url "https://openrouter.ai/api/v1" \
-    --api_key "$OPENROUTER_API_KEY" \
-    --reasoning_model "deepseek/deepseek-chat-v3-0324" \
-    --coding_model "qwen/qwen-2.5-coder-32b-instruct" \
-    --output_dir outputs/kumo \
-    --output_repo_dir repos/kumo \
-    --resume_from_analysis
-```
-
-**Resume Logic:**
-- If planning phase is complete but analysis isn't → Resume from analysis
-- If both planning and analysis are complete → Skip directly to coding
-- Otherwise → Start from the beginning
-
----
-
 ## 📊 Output Structure
 
 ### Complete Pipeline Outputs
 ```
-outputs/kumo/
+outputs/paper/
 ├── 📋 Planning Artifacts (7 stages)
 │   ├── planning_response.json                 # Raw planning API response
 │   ├── planning_structured.json              # Core planning with predicates-first
@@ -233,7 +201,7 @@ outputs/kumo/
 │   └── coding_results.json                  # Success/failure summary
 │
 └── 📄 Final Repository
-repos/kumo_repo/
+repos/paper_repo/
 ├── config.yaml                # Runtime configuration (copied from planning)
 ├── main.py                    # Entry point (generated last in development order)
 ├── utils/                     # Utility functions (generated first)
@@ -297,8 +265,16 @@ repos/kumo_repo/
 --seed                # Deterministic generation seed (default: 42)
 
 # Workflow Control
---resume_from_analysis  # Skip planning if data exists
+--resume_from_analysis  # Skip planning and resume from analysis phase if data exists
+--resume_from_coding    # Skip to coding phase and resume from existing generated files  
+--force_regenerate      # Force regeneration of all files (ignore existing generated files)
 ```
+
+**Resume Logic:**
+- **Auto-detection**: System detects completed phases and resumes automatically
+- **Phase-level resume**: Skip planning/analysis phases if already completed  
+- **File-level resume**: Completed files are detected and skipped during code generation
+- **Ctrl-C safe**: Interrupt at any point and resume exactly where you left off
 
 ### Model Recommendations
 
@@ -348,20 +324,18 @@ This enhanced version builds upon the excellent foundation provided by the origi
 
 ### What We Enhanced
 - **Predicates-First Methodology**: FOL logic approach - actions before entities P(S,[O])
+- **Configuration-Driven Pipeline**: Russian nested dolls architecture eliminates hardcoded stage management
 - **Seven-Stage Strategic Planning**: Planning → Six Hats → Dependencies → Code Structure → Architecture → Tasks → Config
+- **File-Level Resume Capability**: Skip completed files automatically on restart
 - **Smart File Organization**: Priority-driven development ordering
 - **Structured Code Generation**: Deliberation + utility + diff format for complete traceability
-- **Basic Resume Capability**: Skip planning phase when data exists
+- **Robust Error Recovery**: Generation setting rotation with automatic retry logic
 - **AutoGen Integration**: Multi-agent collaboration framework (future direction)
 
 ---
 
 ## 🐛 Known Issues
 
-- **Resume Granularity**: Can only resume from analysis phase, not mid-coding
-- **Parallel Dependencies**: Files generated in parallel may have inter-dependencies
-- **Error Recovery**: Limited handling for malformed API responses
+- **AutoGen Integration**: Multi-agent collaboration framework is implemented but commented out (ready for activation)
 
 ---
-
-*Convert PDFs with docling, then transform papers into code with enhanced structured planning.*
