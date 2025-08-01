@@ -106,7 +106,7 @@ class PipelineConfig:
     @classmethod
     def get_prompt_args(cls, stage_name: str, paper_content: str, structured_responses: Dict[str, Any], 
                        **extra_args) -> List:
-        """Build prompt arguments for a stage dynamically"""
+        """Build prompt arguments for a stage dynamically with support for accumulating context"""
         dependencies = cls.get_stage_dependencies(stage_name)
         context = cls.build_context_for_stage(stage_name, structured_responses)
         
@@ -118,9 +118,24 @@ class PipelineConfig:
             if dep_stage in context:
                 args.append(context[dep_stage])
         
-        # Add any extra arguments (like file_name for analysis)
-        for key, value in extra_args.items():
-            args.append(value)
+        # Add any extra arguments (like file_name for analysis, prior_context, etc.)
+        # Special handling for analysis stage to ensure correct argument order
+        if stage_name == 'analysis':
+            # Analysis prompt expects: paper_content, planning_response, six_hats_response, 
+            # dependency_response, architecture_response, uml_response, task_list_response,
+            # todo_file_name, todo_file_desc, prior_analyses_context
+            
+            # Extra args should contain: todo_file_name, todo_file_desc, prior_analyses_context
+            todo_file_name = extra_args.get('todo_file_name', '')
+            todo_file_desc = extra_args.get('todo_file_desc', '')
+            prior_analyses_context = extra_args.get('prior_analyses_context', '')
+            
+            # Add in expected order
+            args.extend([todo_file_name, todo_file_desc, prior_analyses_context])
+        else:
+            # For other stages, add extra arguments in the order they were provided
+            for key, value in extra_args.items():
+                args.append(value)
         
         return args
 
@@ -222,14 +237,6 @@ def _format_nested_dict(data: Dict[str, Any], indent_level: int) -> str:
     return "\n".join(lines)
 
 def parse_structured_response(response_content: str) -> Dict[str, Any]:
-    """Parse structured JSON response from API"""
-    try:
-        return json.loads(response_content)
-    except json.JSONDecodeError as e:
-        print(f"Failed to parse JSON response: {e}")
-        print(f"Response content: {response_content}")
-        raise
-
     """Parse structured JSON response from API using json-repair for robust parsing"""
     from json_repair import repair_json
     
@@ -970,105 +977,143 @@ class CodingPipeline:
     
     # Then update the generate_single_file call to:
     def generate_single_file(self, file_info: Tuple[str, str, str], shared_context: Dict[str, str]) -> Dict[str, Any]:
-            """Generate code for a single file using structured response"""
-            todo_file_name, detailed_logic_analysis, utility_description = file_info
+        """Generate code for a single file using structured response with enhanced context accumulation"""
+        todo_file_name, detailed_logic_analysis, utility_description = file_info
+        
+        try:
+            print(f"\n[CODING] {todo_file_name}")
+            print(f"   Utility: {utility_description[:100]}{'...' if len(utility_description) > 100 else ''}")
+            if len(self.done_files) > 1:  # More than just config.yaml
+                print(f"   📚 Context: Informed by {len(self.done_files)-1} previously generated files")
             
-            try:
-                print(f"\n[CODING] {todo_file_name}")
-                print(f"   Utility: {utility_description[:100]}{'...' if len(utility_description) > 100 else ''}")
+            # Build comprehensive context of previously implemented files
+            code_files = ""
+            if len(self.done_files) > 1:  # More than just config.yaml
+                code_files += "\n## Previously Generated Files (For Context & Integration)\n"
                 
-                # Build context of previously implemented files
-                code_files = ""
-                for done_file in self.done_files:
+                for i, done_file in enumerate(self.done_files, 1):
                     if done_file.endswith(".yaml"):
                         continue
                     if done_file in self.done_file_dict:
-                        code_files += f"""
-    ### {done_file}
+                        file_code = self.done_file_dict[done_file]
+                        
+                        # Include full code for recent files, summarized for older files
+                        if i <= 3:  # Full code for last 3 files
+                            code_files += f"""
+    ### {done_file} (Full Implementation)
     ```python
-    {self.done_file_dict[done_file]}
+    {file_code}
+    ```
+
+    """
+                        else:  # Summarized for older files to manage context
+                            # Extract class/function signatures for context
+                            lines = file_code.split('\n')
+                            signatures = []
+                            for line in lines:
+                                stripped = line.strip()
+                                if (stripped.startswith('class ') or 
+                                    stripped.startswith('def ') or 
+                                    stripped.startswith('async def ')):
+                                    signatures.append(line)
+                            
+                            code_files += f"""
+    ### {done_file} (Key Signatures)
+    ```python
+    {chr(10).join(signatures[:10])}  # ... (truncated for context management)
     ```
 
     """
                 
-                # Generate prompt using the enhanced function with dynamic context
-                from prompts import get_coding_prompt, CODE_SCHEMA
-                messages = get_coding_prompt(
-                    todo_file_name, 
-                    detailed_logic_analysis,
-                    utility_description,
-                    shared_context['paper_content'],
-                    shared_context['config_yaml'],
-                    shared_context,  # Pass entire context instead of individual keys
-                    code_files
-                )
-                
-                # Make API call with structured response
-                completion = self.api_client.chat_completion(
-                    model=self.coding_model,
-                    messages=messages,
-                    response_format=CODE_SCHEMA,  # Use structured output
-                    stream=True
-                )
-                
-                # Parse structured response
-                content = completion['choices'][0]['message']['content']
-                structured_data = parse_structured_response(content)
-                
-                # Extract information from structured response
-                deliberation = structured_data.get('deliberation', '')
-                utility = structured_data.get('utility', '')
-                diff_code = self.extract_code_from_structured_response(structured_data, todo_file_name)
-                
-                # Convert diff to clean code
-                clean_code = self.clean_diff_to_code(diff_code)
-                
-                # Create diff file (keep original diff format)
-                diff_path = self.create_diff_file(todo_file_name, diff_code)
-                
-                # Save artifacts
-                safe_filename = todo_file_name.replace("/", "_").replace("\\", "_")
-                
-                # Save structured response
-                with open(f"{self.output_dir}/structured_code_responses/{safe_filename}_structured.json", 'w') as f:
-                    json.dump(structured_data, f, indent=2)
-                
-                # Save full response
-                with open(f"{self.output_dir}/coding_artifacts/{safe_filename}_coding.txt", 'w') as f:
-                    f.write(content)
-                
-                # Save deliberation and utility separately for easy access
-                with open(f"{self.output_dir}/coding_artifacts/{safe_filename}_deliberation.txt", 'w') as f:
-                    f.write(f"DELIBERATION:\n{deliberation}\n\nUTILITY:\n{utility}")
-                
-                # Write clean code file to repository
-                if "/" in todo_file_name:
-                    todo_file_dir = '/'.join(todo_file_name.split("/")[:-1])
-                    os.makedirs(f"{self.output_repo_dir}/{todo_file_dir}", exist_ok=True)
-                
-                with open(f"{self.output_repo_dir}/{todo_file_name}", 'w') as f:
-                    f.write(clean_code)
-                
-                return {
-                    'filename': todo_file_name,
-                    'success': True,
-                    'code': clean_code,
-                    'diff_code': diff_code,
-                    'diff_path': diff_path,
-                    'deliberation': deliberation,
-                    'utility': utility,
-                    'structured_data': structured_data,
-                    'content': content
-                }
-                
-            except Exception as e:
-                print(f"❌ Error generating {todo_file_name}: {e}")
-                return {
-                    'filename': todo_file_name,
-                    'success': False,
-                    'error': str(e),
-                    'diff_path': None
-                }
+                code_files += """
+    **INTEGRATION GUIDANCE**: The above files show the established patterns, interfaces, and design decisions. Ensure your implementation integrates seamlessly with these existing components.
+
+    -----
+    """
+            
+            # Generate prompt using the enhanced function with dynamic context
+            from prompts import get_coding_prompt, CODE_SCHEMA
+            messages = get_coding_prompt(
+                todo_file_name, 
+                detailed_logic_analysis,
+                utility_description,
+                shared_context['paper_content'],
+                shared_context['config_yaml'],
+                shared_context,  # Pass entire context instead of individual keys
+                code_files
+            )
+            
+            # Make API call with structured response
+            completion = self.api_client.chat_completion(
+                model=self.coding_model,
+                messages=messages,
+                response_format=CODE_SCHEMA,  # Use structured output
+                stream=True
+            )
+            
+            # Parse structured response
+            content = completion['choices'][0]['message']['content']
+            structured_data = parse_structured_response(content)
+            
+            # Extract information from structured response
+            deliberation = structured_data.get('deliberation', '')
+            utility = structured_data.get('utility', '')
+            diff_code = self.extract_code_from_structured_response(structured_data, todo_file_name)
+            
+            # Convert diff to clean code
+            clean_code = self.clean_diff_to_code(diff_code)
+            
+            # Create diff file (keep original diff format)
+            diff_path = self.create_diff_file(todo_file_name, diff_code)
+            
+            # Save artifacts
+            safe_filename = todo_file_name.replace("/", "_").replace("\\", "_")
+            
+            # Save structured response
+            with open(f"{self.output_dir}/structured_code_responses/{safe_filename}_structured.json", 'w') as f:
+                json.dump(structured_data, f, indent=2)
+            
+            # Save full response
+            with open(f"{self.output_dir}/coding_artifacts/{safe_filename}_coding.txt", 'w') as f:
+                f.write(content)
+            
+            # Save deliberation and utility separately for easy access
+            with open(f"{self.output_dir}/coding_artifacts/{safe_filename}_deliberation.txt", 'w') as f:
+                f.write(f"DELIBERATION:\n{deliberation}\n\nUTILITY:\n{utility}")
+            
+            # Write clean code file to repository
+            if "/" in todo_file_name:
+                todo_file_dir = '/'.join(todo_file_name.split("/")[:-1])
+                os.makedirs(f"{self.output_repo_dir}/{todo_file_dir}", exist_ok=True)
+            
+            with open(f"{self.output_repo_dir}/{todo_file_name}", 'w') as f:
+                f.write(clean_code)
+            
+            # Add to done files for subsequent iterations (ACCUMULATING CONTEXT)
+            self.done_files.append(todo_file_name)
+            self.done_file_dict[todo_file_name] = clean_code
+            
+            return {
+                'filename': todo_file_name,
+                'success': True,
+                'code': clean_code,
+                'diff_code': diff_code,
+                'diff_path': diff_path,
+                'deliberation': deliberation,
+                'utility': utility,
+                'structured_data': structured_data,
+                'content': content,
+                'context_files_count': len([f for f in self.done_files if not f.endswith('.yaml')])
+            }
+            
+        except Exception as e:
+            print(f"❌ Error generating {todo_file_name}: {e}")
+            return {
+                'filename': todo_file_name,
+                'success': False,
+                'error': str(e),
+                'diff_path': None
+            }
     
     def process_files_parallel(self, file_tasks: List[Tuple[str, str, str]], 
                               shared_context: Dict[str, str]) -> List[Dict[str, Any]]:

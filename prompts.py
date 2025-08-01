@@ -854,13 +854,29 @@ Based on all the analysis above, create a detailed task breakdown that incorpora
 
 # Update get_analysis_prompt to include UML:
 
-def get_analysis_prompt(paper_content, planning_response, six_hats_response, dependency_response, architecture_response, uml_response, task_list_response, todo_file_name, todo_file_desc=""):
+def get_analysis_prompt(paper_content, planning_response, six_hats_response, dependency_response, 
+                        architecture_response, uml_response, task_list_response, todo_file_name, 
+                        todo_file_desc="", prior_analyses_context=""):
+    """Generate analysis prompt with accumulating context from prior file analyses"""
+    
+    # Build prior context section if available
+    prior_context_section = ""
+    if prior_analyses_context.strip():
+        prior_context_section = f"""
+## Prior File Analyses (For Context & Coherence)
+{prior_analyses_context.strip()}
+
+**COHERENCE GUIDANCE**: The above analyses show how previous files have interpreted unclear requirements and made design decisions. Maintain consistency with these approaches while focusing on your specific file.
+
+-----
+"""
+    
     return [
         {
             "role": "system",
             "content": """You are an expert software architect and researcher specializing in implementing academic research.
 
-Your task is to conduct detailed logic analysis for implementing each component, ensuring it accurately reproduces the research methodology.
+Your task is to conduct detailed logic analysis for implementing each component, ensuring it accurately reproduces the research methodology while maintaining coherence with previously analyzed files.
 
 **Token Format**: You will receive structured data wrapped in XML-like tokens (e.g., <planning>...</planning>). Inside these tokens, data is formatted as indented key-value pairs without colons or braces:
 - Keys are on their own lines
@@ -870,14 +886,17 @@ Your task is to conduct detailed logic analysis for implementing each component,
 
 Focus on PREDICATES FIRST (methods/actions), then ENTITIES (classes/agents).
 
+**COHERENCE PRINCIPLE**: When prior file analyses are provided, ensure your decisions are consistent with established patterns for handling unclear requirements and design choices.
+
 Key principles:
 1. STAY TRUE to the paper's methodology - don't add unnecessary complexity
-2. Focus on PRACTICAL implementation details
-3. Consider data flow, error handling, and modularity  
-4. Specify interfaces between components clearly
-5. Address any ambiguities or missing details from the paper
-6. Use the UML design as a structural guide
-7. Consider dependency ranking for implementation priorities"""
+2. MAINTAIN CONSISTENCY with prior file analyses where applicable
+3. Focus on PRACTICAL implementation details
+4. Consider data flow, error handling, and modularity  
+5. Specify interfaces between components clearly
+6. Address any ambiguities or missing details from the paper
+7. Use the UML design as a structural guide
+8. Consider dependency ranking for implementation priorities"""
         },
         {
             "role": "user",
@@ -902,7 +921,7 @@ Key principles:
 ## Task Breakdown
 {task_list_response}
 
-## Analysis Task
+{prior_context_section}## Analysis Task
 Analyze the implementation logic for '{todo_file_name}'{f", which is intended for '{todo_file_desc}'" if todo_file_desc.strip() else ""}.
 
 ## Requirements Analysis
@@ -913,6 +932,7 @@ Focus on **METHODS FIRST, CLASSES SECOND**:
 - What specific algorithms/methods from the paper does this file implement?
 - What are the key inputs, outputs, and transformations?
 - How does this relate to the dependency ranking?
+- **If prior analyses exist**: How does this file's functionality complement previously analyzed components?
 
 ### 2. Implementation Strategy  
 - How should this component be structured (classes, functions)?
@@ -920,11 +940,13 @@ Focus on **METHODS FIRST, CLASSES SECOND**:
 - How does it interface with other components?
 - How does it align with the UML class and component design?
 - What is its priority based on dependency analysis?
+- **If prior analyses exist**: Ensure consistency with established architectural patterns
 
 ### 3. Technical Considerations
 - What are the computational requirements?
 - What error handling is needed?
 - Are there performance considerations?
+- **If prior analyses exist**: Maintain consistency with established technical approaches
 
 ### 4. Dependencies and Data Flow
 - What external libraries are required?
@@ -932,14 +954,17 @@ Focus on **METHODS FIRST, CLASSES SECOND**:
 - How does data flow in and out of this component?
 - How does it connect to other components per the UML design?
 - What are the dependency relationships with other files?
+- **If prior analyses exist**: Ensure data flow compatibility with previously analyzed components
 
 ### 5. Testing and Validation
 - How can this component be tested independently?
 - What validation checks are needed?
+- **If prior analyses exist**: Maintain consistency with established testing approaches
 
 ### 6. Paper-Specific Requirements
 - What specific details from the paper must be preserved?
 - Are there any ambiguities that need clarification?
+- **If prior analyses exist**: How have similar ambiguities been resolved in previous files?
 
 ### 7. Focused Requirements (Product Design)
 Structure your analysis around:
@@ -947,8 +972,9 @@ Structure your analysis around:
 - **Classes Focus**: Class definitions and member variables this file contains (reference UML design)
 - **Predicate Interactions**: How this file's methods interact with other components
 - **Dependency Priority**: How this file fits into the overall dependency ranking
+- **Coherence Check**: If prior analyses exist, ensure your approach is consistent with established patterns
 
-Provide practical implementation guidance for robust, maintainable code that follows the UML design and dependency priorities."""
+Provide practical implementation guidance for robust, maintainable code that follows the UML design, dependency priorities, and maintains coherence with previously analyzed components."""
         }
     ]
     
