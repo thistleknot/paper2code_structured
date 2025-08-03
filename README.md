@@ -15,6 +15,10 @@
 - **🔄 Advanced Resume Capability**: Resume from any phase and skip completed files automatically
 - **📄 PDF Support**: Use docling to convert PDFs to markdown before processing
 - **🎯 Uncertainty Boundary Management**: Systematic propagation of "unclear" items across stages
+- **🔍 Robust Repeition Detection**: Multiple repetetition detectors.
+- **🧠 Global Memory**: Whiteboard system of information passing between iterations of a given stage, i.e. pending to-do's.  Reduces memory burden associated with prepending all generated code.
+- **🎯 Structured Files**: Reduce files to: imports, constants, functions, classes, main.
+- **🔄 2nd Pass: Refinement Stage**: Reviews implementation shortcomings
 
 ---
 
@@ -58,9 +62,10 @@ python main.py \
     --api_base_url "https://openrouter.ai/api/v1" \
     --api_key "$OPENROUTER_API_KEY" \
     --reasoning_model "deepseek/deepseek-chat-v3-0324" \
-    --coding_model "qwen/qwen-2.5-coder-32b-instruct" \
+    --coding_model "deepseek/deepseek-chat-v3-0324" \
     --output_dir outputs/paper \
     --output_repo_dir repos/paper
+    --enable_iterative_refinement
 ```
 
 ---
@@ -427,3 +432,5 @@ This pattern can be applied to any multi-iteration LLM workflow requiring global
 - **AutoGen Integration**: Multi-agent collaboration framework is implemented but commented out (ready for activation)
 
 ---
+
+rm output/kumo/coding_results.json
