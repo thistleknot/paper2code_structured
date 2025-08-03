@@ -1,191 +1,514 @@
 # functions.py
 """
-Core functions and classes for the planning pipeline
+Core functions and classes for the whiteboard-based planning pipeline
 """
 
 from imports import *
+import yaml
 
-# Add this to functions.py
+import difflib
+import ast
+import re
+  
+try:
+    import tiktoken
+    enc = tiktoken.get_encoding("cl100k_base")
+except:
+    enc = None
 
-class PipelineConfig:
-    """Centralized pipeline configuration and stage management"""
+
+class WhiteboardManager:
+    """Manages persistent JSON whiteboard state with YAML formatting for LLM context"""
     
-    # Define the pipeline stages and their dependencies
-    STAGES = {
-        'planning': {
-            'dependencies': [],
-            'schema': 'PLANNING_SCHEMA',
-            'model': 'reasoning',
-            'prompt_func': 'get_planning_prompt'
-        },
-        'six_hats': {
-            'dependencies': ['planning'],
-            'schema': 'SIX_HATS_SCHEMA', 
-            'model': 'reasoning',
-            'prompt_func': 'get_six_hats_prompt'
-        },
-        'dependency': {
-            'dependencies': ['planning', 'six_hats'],
-            'schema': 'DEPENDENCY_SCHEMA',
-            'model': 'reasoning', 
-            'prompt_func': 'get_dependency_prompt'
-        },
-        'code_structure': {
-            'dependencies': ['planning', 'six_hats', 'dependency'],
-            'schema': 'CODE_STRUCTURE_SCHEMA',
-            'model': 'reasoning',
-            'prompt_func': 'get_code_structure_prompt'
-        },
-        'architecture': {
-            'dependencies': ['planning', 'six_hats', 'dependency', 'code_structure'],
-            'schema': 'ARCHITECTURE_SCHEMA',
-            'model': 'reasoning',
-            'prompt_func': 'get_architecture_prompt'
-        },
-        'task_list': {
-            'dependencies': ['planning', 'six_hats', 'dependency', 'code_structure', 'architecture'],
-            'schema': 'TASK_LIST_SCHEMA',
-            'model': 'reasoning',
-            'prompt_func': 'get_task_list_prompt'
-        },
-        'config': {
-            'dependencies': ['planning', 'six_hats', 'dependency', 'code_structure', 'architecture', 'task_list'],
-            'schema': 'CONFIG_SCHEMA',
-            'model': 'coding',
-            'prompt_func': 'get_config_prompt'
-        },
-        'analysis': {
-            'dependencies': ['planning', 'six_hats', 'dependency', 'architecture', 'code_structure', 'task_list'],
-            'schema': 'ANALYSIS_SCHEMA',
-            'model': 'reasoning',
-            'prompt_func': 'get_analysis_prompt'
-        },
-        'file_organization': {
-            'dependencies': ['task_list'],  # Only needs task list and analysis summaries
-            'schema': 'FILE_ORGANIZATION_SCHEMA',
-            'model': 'reasoning',
-            'prompt_func': 'get_file_organization_prompt'
+    def __init__(self, output_dir: str):
+        self.output_dir = output_dir
+        self.whiteboard_file = os.path.join(output_dir, "whiteboard.json")
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Initialize whiteboard if it doesn't exist
+        if not os.path.exists(self.whiteboard_file):
+            self.save_whiteboard({})
+    def take_snapshot(self, name: str) -> None:
+        """Save current state with timestamp"""
+        snapshot = {
+            'timestamp': time.time(),
+            'state': self.load_whiteboard(),
+            'name': name
         }
-    }
-    
-    @classmethod
-    def get_stage_dependencies(cls, stage_name: str) -> List[str]:
-        """Get list of stages this stage depends on"""
-        return cls.STAGES.get(stage_name, {}).get('dependencies', [])
-    
-    @classmethod
-    def get_stage_schema(cls, stage_name: str) -> str:
-        """Get schema name for stage"""
-        return cls.STAGES.get(stage_name, {}).get('schema')
-    
-    @classmethod
-    def get_stage_model(cls, stage_name: str) -> str:
-        """Get model type for stage (reasoning/coding)"""
-        return cls.STAGES.get(stage_name, {}).get('model', 'reasoning')
-    
-    @classmethod
-    def get_stage_prompt_func(cls, stage_name: str) -> str:
-        """Get prompt function name for stage"""
-        return cls.STAGES.get(stage_name, {}).get('prompt_func')
-    
-    @classmethod
-    def build_context_for_stage(cls, stage_name: str, structured_responses: Dict[str, Any]) -> Dict[str, str]:
-        """Build context dictionary for a stage based on its dependencies"""
-        context = {}
-        dependencies = cls.get_stage_dependencies(stage_name)
-        
-        for dep_stage in dependencies:
-            if dep_stage in structured_responses:
-                context[dep_stage] = format_dict_as_yaml_style(
-                    structured_responses[dep_stage], 
-                    dep_stage
-                )
-        
-        return context
-    
-    @classmethod
-    def get_prompt_args(cls, stage_name: str, paper_content: str, structured_responses: Dict[str, Any], 
-                       **extra_args) -> List:
-        """Build prompt arguments for a stage dynamically with support for accumulating context"""
-        dependencies = cls.get_stage_dependencies(stage_name)
-        context = cls.build_context_for_stage(stage_name, structured_responses)
-        
-        # Base arguments that every prompt gets
-        args = [paper_content]
-        
-        # Add dependency contexts in order
-        for dep_stage in dependencies:
-            if dep_stage in context:
-                args.append(context[dep_stage])
-        
-        # Add any extra arguments (like file_name for analysis, prior_context, etc.)
-        # Special handling for analysis stage to ensure correct argument order
-        if stage_name == 'analysis':
-            # Analysis prompt expects: paper_content, planning_response, six_hats_response, 
-            # dependency_response, architecture_response, uml_response, task_list_response,
-            # todo_file_name, todo_file_desc, prior_analyses_context
-            
-            # Extra args should contain: todo_file_name, todo_file_desc, prior_analyses_context
-            todo_file_name = extra_args.get('todo_file_name', '')
-            todo_file_desc = extra_args.get('todo_file_desc', '')
-            prior_analyses_context = extra_args.get('prior_analyses_context', '')
-            
-            # Add in expected order
-            args.extend([todo_file_name, todo_file_desc, prior_analyses_context])
-        else:
-            # For other stages, add extra arguments in the order they were provided
-            for key, value in extra_args.items():
-                args.append(value)
-        
-        return args
+        self.save_whiteboard({'last_snapshot': snapshot})
+        print(f"📸 Whiteboard snapshot '{name}' saved")
 
-      
-def build_shared_context(structured_responses: Dict[str, Any], paper_content: str, 
-                        config_yaml: str, context_data: Dict[str, str]) -> Dict[str, str]:
-    """Build shared context dynamically from whatever context data is available"""
+    def get_snapshot_diff(self, snapshot_name: str) -> Dict[str, Any]:
+        """Compare current state to snapshot"""
+        current = self.load_whiteboard()
+        snapshot = current.get('snapshots', {}).get(snapshot_name, {})
+        
+        diff = {
+            'added': {},
+            'removed': {},
+            'changed': {}
+        }
+        
+        # Simple diff logic - can be enhanced
+        for k, v in current.items():
+            if k not in snapshot:
+                diff['added'][k] = v
+            elif snapshot[k] != v:
+                diff['changed'][k] = {'old': snapshot[k], 'new': v}
+        
+        for k in snapshot.keys() - current.keys():
+            diff['removed'][k] = snapshot[k]
+            
+        return diff
+    def load_whiteboard(self) -> Dict[str, Any]:
+        """Load current whiteboard state"""
+        try:
+            with open(self.whiteboard_file, 'r') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
     
-    shared_context = {
-        'paper_content': paper_content,
-        'config_yaml': config_yaml
-    }
+    def save_whiteboard(self, whiteboard: Dict[str, Any]) -> None:
+        """Save whiteboard state to disk"""
+        with open(self.whiteboard_file, 'w') as f:
+            json.dump(whiteboard, f, indent=2)
     
-    # Just add whatever context keys actually exist - no hardcoded mapping needed!
-    for key, value in context_data.items():
-        if key.startswith('context_'):
-            shared_context[key] = value
-            print(f"   + Added {key}")
+    def get_whiteboard_yaml(self) -> str:
+        """Get current whiteboard state formatted as YAML for LLM context"""
+        whiteboard = self.load_whiteboard()
+        if not whiteboard:
+            return "whiteboard: {}\n"
+        
+        try:
+            return yaml.dump(whiteboard, default_flow_style=False, sort_keys=False)
+        except Exception as e:
+            print(f"Warning: YAML formatting failed: {e}")
+            return f"whiteboard: {json.dumps(whiteboard, indent=2)}\n"
+                
+    # Replace the existing _set_nested_key logic in WhiteboardManager.apply_updates() with this:
+
+    def apply_updates(self, updates: List[str]) -> Dict[str, Any]:
+        """Apply array of key.value updates to whiteboard with improved validation"""
+        whiteboard = self.load_whiteboard()
+        
+        if not isinstance(updates, list):
+            print(f"Warning: updates is not a list: {type(updates)} - {updates}")
+            return whiteboard
+        
+        for update in updates:
+            if not isinstance(update, str):
+                print(f"Warning: Skipping non-string update: {type(update)} - {update}")
+                continue
+                
+            if not update.strip():
+                continue
+                
+            try:
+                # Try key=value format first
+                if '=' in update:
+                    key_path, value = update.split('=', 1)
+                    key_path = key_path.strip()
+                    value = value.strip()
+                    
+                    # Handle deletion (empty value)
+                    if value == '':
+                        self._delete_nested_key(whiteboard, key_path)
+                    else:
+                        # Auto-convert common types
+                        if value.lower() == 'true':
+                            value = True
+                        elif value.lower() == 'false':
+                            value = False
+                        elif value.isdigit():
+                            value = int(value)
+                        elif value.replace('.', '').isdigit() and value.count('.') <= 1:
+                            try:
+                                value = float(value)
+                            except ValueError:
+                                pass  # Keep as string
+                        
+                        self._set_nested_key(whiteboard, key_path, value)
+                
+                # Try key:value format (colon separator)
+                elif ':' in update:
+                    key_path, value = update.split(':', 1)
+                    key_path = key_path.strip()
+                    value = value.strip()
+                    
+                    if value == 'completed':
+                        value = True
+                    elif value == 'true':
+                        value = True
+                    elif value == 'false':
+                        value = False
+                    
+                    self._set_nested_key(whiteboard, key_path, value)
+                
+                # If it's descriptive text, try to extract meaningful info
+                else:
+                    # Skip descriptive updates that don't follow key=value format
+                    # Just log them for debugging but don't try to parse
+                    print(f"Info: Descriptive update (not applied): {update[:50]}...")
+                    continue
+                    
+            except Exception as e:
+                print(f"Warning: Failed to apply update '{update}': {e}")
+                continue
+        
+        self.save_whiteboard(whiteboard)
+        return whiteboard
     
-    print(f"📋 Built shared context dynamically with {len(shared_context)} keys")
-    return shared_context
+    def _set_nested_key(self, data: Dict[str, Any], key_path: str, value: Any) -> None:
+        """Set nested dictionary key using dot notation"""
+        keys = key_path.split('.')
+        current = data
+        
+        # Navigate to parent of target key
+        for key in keys[:-1]:
+            if key not in current:
+                current[key] = {}
+            elif not isinstance(current[key], dict):
+                current[key] = {}  # Overwrite non-dict values
+            current = current[key]
+        
+        # Set the final key
+        current[keys[-1]] = value
+    
+    def _delete_nested_key(self, data: Dict[str, Any], key_path: str) -> None:
+        """Delete nested dictionary key using dot notation"""
+        keys = key_path.split('.')
+        current = data
+        
+        # Navigate to parent of target key
+        try:
+            for key in keys[:-1]:
+                current = current[key]
+            
+            # Delete the final key if it exists
+            if keys[-1] in current:
+                del current[keys[-1]]
+        except (KeyError, TypeError):
+            # Key path doesn't exist, nothing to delete
+            pass
+    
+    def add_stage_completion(self, stage_name: str, structured_data: Dict[str, Any]) -> None:
+        """Add stage completion data to whiteboard"""
+        updates = [
+            f"pipeline.stages.{stage_name}.completed=true",
+            f"pipeline.stages.{stage_name}.timestamp={time.time()}"
+        ]
+        
+        # Add key insights from stage
+        if stage_name == 'planning':
+            if 'features' in structured_data:
+                for i, feature in enumerate(structured_data['features']):
+                    updates.append(f"knowledge.features.{i}={feature}")
+                    
+        elif stage_name == 'dependency':
+            if 'ranked' in structured_data:
+                for i, item in enumerate(structured_data['ranked']):
+                    rank = item.get('rank', 'unknown')
+                    title = item.get('title', 'unknown')
+                    updates.append(f"knowledge.priorities.{rank}_features.{i}={title}")
+        
+        # Apply stage-specific updates
+        self.apply_updates(updates)
+
+
 
 class StreamMonitor:
     """External monitor that watches streaming content and can kill the stream"""
     
-    def __init__(self, repetition_threshold: int = 100):
+    def __init__(self, repetition_threshold: int = 50):
         self.content_buffer = ""
         self.should_terminate = False
         self.repetition_threshold = repetition_threshold
-    
+        self.max_line_length = 1500  # Hard limit for line length
+        self.consecutive_long_lines = 0
+        self.max_consecutive_long_lines = 2
+        
+        # Content context detection
+        self.in_json_response = False
+        self.json_brace_count = 0
+        self.technical_terms_seen = 0
+        
+        # Try to import language detection
+        self.langdetect_available = False
+        try:
+            from langdetect import detect, LangDetectException
+            self.detect_lang = detect
+            self.LangDetectException = LangDetectException
+            self.langdetect_available = True
+        except ImportError:
+            try:
+                import detectlang
+                self.detect_lang = detectlang.detect
+                self.LangDetectException = Exception
+                self.langdetect_available = True
+            except ImportError:
+                print("⚠️ Language detection libraries not available. Install: pip install langdetect")
+
     def add_content(self, new_content: str) -> bool:
         """Add new content and check for repetition. Returns True if should continue."""
         self.content_buffer += new_content
         
-        # Keep buffer manageable
-        if len(self.content_buffer) > 1000:
-            self.content_buffer = self.content_buffer[-500:]
+        # Update context awareness
+        self._update_content_context(new_content)
         
+        # CHECK FOR CORRUPTION ON EVERY CHUNK - This is critical
+        if self._detect_immediate_corruption(new_content):
+            print(f"\n⚠️ StreamMonitor: Immediate corruption detected, terminating stream...")
+            self.should_terminate = True
+            return False
+            
+        # Keep buffer manageable
+        if len(self.content_buffer) > 3000:
+            self.content_buffer = self.content_buffer[-1500:]
+            
         # Check for repetition patterns every chunk
         if len(self.content_buffer) > self.repetition_threshold:
             if self._detect_repetition():
                 print(f"\n⚠️ StreamMonitor: Repetition detected, terminating stream...")
                 self.should_terminate = True
                 return False
-        
         return True
-    
-    def _detect_repetition(self) -> bool:
-        """Aggressive repetition detection"""
+
+    def _update_content_context(self, content: str) -> None:
+        """Update context awareness based on content patterns"""
+        # Detect JSON context
+        self.json_brace_count += content.count('{') - content.count('}')
         
+        # Check if we're likely in a JSON response
+        json_indicators = ['"type":', '"properties":', '"required":', '"items":', 
+                          '"description":', '"enum":', '"class_headers":', '"updates":']
+        
+        if any(indicator in content for indicator in json_indicators):
+            self.in_json_response = True
+        
+        # Count technical terms that might confuse language detection
+        technical_patterns = [
+            '_', 'Transformer', 'Encoder', 'Parser', 'Generator', 'Sampler', 
+            'Module', 'Analyzer', 'py', 'Config', 'Schema', 'API', 'ICL',
+            'PQL', 'subgraph', 'embeddings', 'gradients'
+        ]
+        
+        for pattern in technical_patterns:
+            self.technical_terms_seen += content.lower().count(pattern.lower())
+
+    def _detect_immediate_corruption(self, content: str) -> bool:
+        """Enhanced corruption detection with context awareness"""
+        lines = content.split('\n')
+        
+        # Check for extremely long lines (CRITICAL CHECK) - but be more lenient for JSON
+        max_allowed = self.max_line_length * 2 if self.in_json_response else self.max_line_length
+        
+        for line in lines:
+            if len(line) > max_allowed:
+                print(f"⚠️ CRITICAL: Extremely long line detected ({len(line)} chars) - terminating")
+                return True
+        
+        # Check minimum newline frequency (missing newlines) - more lenient for structured content
+        newline_threshold = self.max_line_length * 3 if self.in_json_response else self.max_line_length * 2
+        
+        if len(content) > newline_threshold and '\n' not in content:
+            print(f"⚠️ CRITICAL: Missing newlines in {len(content)} char chunk - terminating")
+            return True
+            
+        # Check for garbage characters (non-printable flood) - but allow JSON special chars
+        if len(content) > 100:
+            non_printable = sum(1 for c in content if not c.isprintable() and c not in '\n\t\r ')
+            # Be more lenient with structured content
+            threshold = 0.5 if self.in_json_response else 0.3
+            
+            if non_printable > len(content) * threshold:
+                print(f"⚠️ CRITICAL: High non-printable character ratio ({non_printable/len(content):.1%}) - terminating")
+                return True
+                
+        return False
+
+    def _detect_repetition(self) -> bool:
+        """Context-aware repetition detection"""
+        if len(self.content_buffer) < 50:
+            return False
+        recent_content = self.content_buffer[-300:]
+        
+        # Check all corruption detection methods with context awareness
+        if self._detect_language_corruption(recent_content):
+            return True
+        if self._detect_excessive_repetition(recent_content):
+            return True
+        if self._detect_structural_corruption(recent_content):
+            return True
+            
+        return False
+        
+    def _detect_language_corruption(self, content: str) -> bool:
+        """Context-aware language detection to avoid false positives"""
+        if not self.langdetect_available:
+            return False
+        
+        # Skip language detection entirely for JSON responses with technical terms
+        if self.in_json_response and self.technical_terms_seen > 5:
+            print(f"🔧 Skipping language detection: JSON context with {self.technical_terms_seen} technical terms")
+            return False
+            
+        lines = content.split('\n')
+        corruption_signals = 0
+        total_checks = 0
+        
+        for line in lines:
+            clean_line = line.strip()
+            
+            # Skip empty lines and very short lines
+            if len(clean_line) < 60:  # Increased threshold
+                continue
+            
+            # Skip lines that look like code, JSON, or technical content
+            if self._is_technical_content(clean_line):
+                continue
+                
+            # Check substantially long lines (code or prose)
+            if len(clean_line) > 80:  # Increased threshold
+                try:
+                    detected_lang = self.detect_lang(clean_line)
+                    total_checks += 1
+                    
+                    # For code, we expect English or code-like content
+                    if detected_lang not in ['en', 'ca', 'es', 'fr', 'de', 'nl', 'af']:
+                        corruption_signals += 1
+                        
+                except self.LangDetectException:
+                    # Language detection failed - might be technical content, not gibberish
+                    if len(clean_line) > 200 and not self._is_technical_content(clean_line):
+                        corruption_signals += 1
+                        total_checks += 1
+                except KeyboardInterrupt:
+                    print("⚠️ Language detection interrupted - possible corruption")
+                    return True
+                except Exception as e:
+                    if "timeout" in str(e).lower() or "memory" in str(e).lower():
+                        print(f"⚠️ Language detection error: {e}")
+                        return True
+        
+        # Only trigger on clear corruption with higher thresholds
+        if total_checks >= 3:  # Require more samples
+            corruption_rate = corruption_signals / total_checks
+            # Much higher threshold for structured content
+            threshold = 0.9 if self.in_json_response else 0.7
+            
+            if corruption_rate > threshold:
+                print(f"⚠️ Language corruption detected: {corruption_rate:.1%} corrupted lines ({corruption_signals}/{total_checks})")
+                return True
+                
+        return False
+
+    def _is_technical_content(self, line: str) -> bool:
+        """Identify technical content that shouldn't be language-checked"""
+        technical_indicators = [
+            # JSON structure
+            line.strip().startswith(('{', '}', '"', '[')), 
+            line.strip().endswith((',', ':', '{')),
+            # Code patterns
+            '_' in line and any(term in line for term in ['class', 'function', 'def', 'import']),
+            # Technical terms
+            any(term in line.lower() for term in [
+                'transformer', 'encoder', 'parser', 'generator', 'sampler',
+                'module', 'analyzer', 'config', 'schema', 'api', 'icl', 'pql'
+            ]),
+            # File paths and technical strings
+            '.py' in line or '/' in line or '_' in line,
+            # Method/class naming patterns
+            any(char.isupper() and char.islower() for char in line),  # CamelCase
+            line.count('_') > 2,  # snake_case with multiple underscores
+        ]
+        
+        return any(technical_indicators)
+
+    def _detect_excessive_repetition(self, content: str) -> bool:
+        """Detect repetitive patterns that indicate looping/stuck generation"""
+        # Check for repeated phrases
+        words = content.split()
+        if len(words) < 15:
+            return False
+            
+        # Look for same word repeated many times - but be more lenient for structured content
+        word_counts = {}
+        for word in words[-75:]:
+            if len(word) > 3:
+                word_counts[word] = word_counts.get(word, 0) + 1
+        
+        # Higher threshold for JSON/structured content
+        max_repetition_threshold = 25 if self.in_json_response else 15
+        max_repetition = max(word_counts.values()) if word_counts else 0
+        
+        if max_repetition > max_repetition_threshold:
+            problematic_word = max(word_counts, key=word_counts.get)
+            print(f"⚠️ Excessive word repetition: '{problematic_word}' appears {max_repetition} times")
+            return True
+            
+        # Check for repeated lines - but allow some repetition in JSON
+        lines = content.split('\n')
+        if len(lines) > 3:
+            recent_lines = [line.strip() for line in lines[-15:] if line.strip()]
+            line_counts = {}
+            for line in recent_lines:
+                if len(line) > 20:
+                    line_counts[line] = line_counts.get(line, 0) + 1
+            
+            # Higher threshold for structured content
+            max_line_threshold = 8 if self.in_json_response else 4
+            max_line_repetition = max(line_counts.values()) if line_counts else 0
+            
+            if max_line_repetition > max_line_threshold:
+                repeated_line = max(line_counts, key=line_counts.get)
+                print(f"⚠️ Excessive line repetition: line repeated {max_line_repetition} times")
+                return True
+                
+        return False
+
+    def _detect_structural_corruption(self, content: str) -> bool:
+        """Detect structural issues that indicate corruption"""
+        lines = content.split('\n')
+        
+        # Check for extremely long lines - more lenient for JSON
+        long_line_threshold = 2000 if self.in_json_response else 1200
+        long_line_count = 0
+        
+        for line_idx, line in enumerate(lines):
+            if len(line) > long_line_threshold:
+                long_line_count += 1
+                if long_line_count >= 3:  # Allow more long lines for structured content
+                    print(f"⚠️ Multiple long lines detected")
+                    return True
+        
+        # Check for too many spaces (whitespace explosion) - but allow JSON indentation
+        space_runs = []
+        current_spaces = 0
+        for char in content:
+            if char == ' ':
+                current_spaces += 1
+            else:
+                if current_spaces > 0:
+                    space_runs.append(current_spaces)
+                    # Much higher threshold for structured content
+                    space_threshold = 500 if self.in_json_response else 200
+                    
+                    if current_spaces > space_threshold:
+                        print(f"⚠️ Extreme whitespace run detected: {current_spaces} spaces")
+                        return True
+                current_spaces = 0
+                
+        # Check for character density issues - more lenient for JSON
+        if len(content) > 150:
+            printable_chars = sum(1 for c in content if c.isprintable())
+            printable_ratio = printable_chars / len(content)
+            # More lenient threshold for structured content
+            threshold = 0.6 if self.in_json_response else 0.7
+            
+            if printable_ratio < threshold:
+                print(f"⚠️ High non-printable character ratio: {printable_ratio:.1%}")
+                return True
+                
         return False
         
 def format_dict_as_yaml_style(data: Dict[str, Any], token_name: str, indent_level: int = 0) -> str:
@@ -273,8 +596,9 @@ def load_paper_content(paper_path: str) -> str:
 
 def setup_argument_parser() -> argparse.ArgumentParser:
     """Set up command line argument parser with enhanced resume options"""
-    parser = argparse.ArgumentParser(description="Code generation pipeline with resume capability")
-    
+    parser = argparse.ArgumentParser(description="Whiteboard-based code generation pipeline")
+    parser.add_argument('--resume_from_refinement', action='store_true',
+                   help='Skip to iterative refinement phase')
     parser.add_argument('--paper_name', type=str, required=True)
     parser.add_argument('--reasoning_model', type=str, 
                        default="granite3.3:2b")
@@ -299,53 +623,125 @@ def setup_argument_parser() -> argparse.ArgumentParser:
                        help='Skip to coding phase and resume from existing generated files')
     parser.add_argument('--force_regenerate', action='store_true',
                        help='Force regeneration of all files (ignore existing generated files)')
+    parser.add_argument('--clear_whiteboard', action='store_true',
+                       help='Clear whiteboard state and start fresh')
     
+    # AutoGen validation options
+    parser.add_argument('--autogen_validation_only', action='store_true',
+                       help='Run only AutoGen validation phase on existing generated code')
+    parser.add_argument('--enable_autogen_validation', action='store_true',
+                       help='Enable AutoGen validation phase after regular coding')
+    parser.add_argument('--enable_iterative_refinement', action='store_true',
+                       help='Enable TRIZ-based iterative refinement of generated code')
     return parser
 
 def check_pipeline_state(output_dir: str) -> Dict[str, bool]:
-    """Check what pipeline phases have been completed"""
+    """Check what pipeline phases have been completed by examining disk artifacts"""
     state = {
         'planning_complete': False,
         'analysis_complete': False,
         'file_organization_complete': False,
-        'coding_started': False
+        'coding_started': False,
+        'coding_complete': False,
+        'refinement_complete': False,
+        'autogen_validation_complete': False
     }
     
-    # Check planning completion
-    planning_files = [
-        f"{output_dir}/all_structured_responses.json",
-        f"{output_dir}/planning_config.yaml"
+    print(f"🔍 Checking pipeline state for: {output_dir}")
+    
+    # Check planning completion - look for config file
+    planning_config = os.path.join(output_dir, "planning_config.yaml")
+    state['planning_complete'] = os.path.exists(planning_config)
+    print(f"   Planning complete: {state['planning_complete']} (config file exists)")
+    
+    # Check analysis completion - look for analysis files
+    analysis_files = []
+    if os.path.exists(output_dir):
+        all_files = os.listdir(output_dir)
+        for f in all_files:
+            if (f.endswith('_analysis_response.json') or 
+                f.endswith('_simple_analysis_response.json') or
+                f.endswith('_analysis_structured.json')):
+                analysis_files.append(f)
+    
+    state['analysis_complete'] = len(analysis_files) > 0
+    print(f"   Analysis complete: {state['analysis_complete']} ({len(analysis_files)} analysis files)")
+    
+    # Check file organization completion - look for file organization artifact
+    file_org_file = os.path.join(output_dir, "file_organization_structured.json")
+    state['file_organization_complete'] = os.path.exists(file_org_file)
+    print(f"   File organization complete: {state['file_organization_complete']} (org file exists)")
+    
+    # Check coding completion - look for generated code files in repo directory
+    # Infer repo directory from output directory pattern
+    repo_dir = output_dir.replace('output/', 'repos/') if 'output/' in output_dir else output_dir + '_repo'
+    
+    if os.path.exists(repo_dir):
+        py_files = [f for f in os.listdir(repo_dir) if f.endswith('.py')]
+        yaml_files = [f for f in os.listdir(repo_dir) if f.endswith('.yaml')]
+        
+        # For simplified 5-file structure
+        simplified_files = ['imports.py', 'constants.py', 'functions.py', 'classes.py', 'main.py']
+        has_simplified_structure = all(f in py_files for f in simplified_files)
+        
+        # For any substantial code generation
+        has_substantial_code = len(py_files) >= 3 and 'main.py' in py_files
+        
+        state['coding_complete'] = has_simplified_structure or has_substantial_code
+        state['coding_started'] = len(py_files) > 0
+        
+        print(f"   Coding complete: {state['coding_complete']} (repo: {len(py_files)} py files)")
+        print(f"   Simplified structure: {has_simplified_structure}")
+        print(f"   Generated files: {py_files + yaml_files}")
+    else:
+        print(f"   Coding complete: False (no repo dir: {repo_dir})")
+    
+    # Check refinement completion - look for corrected_* files
+    if os.path.exists(repo_dir):
+        corrected_files = [f for f in os.listdir(repo_dir) if f.startswith('corrected_')]
+        state['refinement_complete'] = len(corrected_files) > 0
+        print(f"   Refinement complete: {state['refinement_complete']} ({len(corrected_files)} corrected files)")
+    else:
+        print(f"   Refinement complete: False (no repo dir)")
+    
+    # Check autogen validation completion - look for validation artifacts
+    autogen_artifacts = [
+        os.path.join(output_dir, "autogen_validation.json"),
+        os.path.join(output_dir, "autogen_results.json"),
+        os.path.join(repo_dir, "autogen_validation_complete.txt") if os.path.exists(repo_dir) else None
     ]
-    state['planning_complete'] = all(os.path.exists(f) for f in planning_files)
     
-    # Check analysis completion
-    if state['planning_complete']:
-        try:
-            with open(f"{output_dir}/all_structured_responses.json") as f:
-                structured_responses = json.load(f)
-            
-            artifact_manager = ArtifactManager(output_dir)
-            task_list = artifact_manager.get_task_list_from_responses(structured_responses)
-            state['analysis_complete'] = artifact_manager.check_analysis_completion(task_list)
-        except:
-            state['analysis_complete'] = False
-    
-    # Check file organization completion
-    state['file_organization_complete'] = os.path.exists(f"{output_dir}/file_organization_structured.json")
-    
-    # Check if any coding has started
-    coding_dirs = [
-        f"{output_dir}/structured_code_responses",
-        f"{output_dir}/diffs",
-        f"{output_dir}/coding_artifacts"
-    ]
-    state['coding_started'] = any(
-        os.path.exists(d) and os.listdir(d) 
-        for d in coding_dirs 
-        if os.path.exists(d)
+    state['autogen_validation_complete'] = any(
+        artifact and os.path.exists(artifact) for artifact in autogen_artifacts
     )
+    print(f"   AutoGen validation complete: {state['autogen_validation_complete']} (validation artifacts)")
     
     return state
+
+def validate_autogen_prerequisites(output_dir: str, output_repo_dir: str) -> bool:
+    """Check if prerequisites for AutoGen validation are met"""
+    
+    # Check if coding phase is complete
+    pipeline_state = check_pipeline_state(output_dir)
+    
+    if not pipeline_state['coding_complete']:
+        print("❌ AutoGen validation requires completed coding phase")
+        print("   Run the full pipeline first or use --resume_from_coding")
+        return False
+    
+    # Check if generated Python files exist
+    if not os.path.exists(output_repo_dir):
+        print(f"❌ Repository directory not found: {output_repo_dir}")
+        return False
+    
+    py_files = [f for f in os.listdir(output_repo_dir) if f.endswith('.py')]
+    if not py_files:
+        print(f"❌ No Python files found in repository: {output_repo_dir}")
+        return False
+    
+    print(f"✅ Prerequisites met for AutoGen validation")
+    print(f"   Found {len(py_files)} Python files: {', '.join(py_files)}")
+    return True
 
 def print_response(response: Dict[str, Any]) -> None:
     """Print formatted response for debugging"""
@@ -370,22 +766,21 @@ class APIClient:
     """Handles API calls to OpenAI-compatible endpoints with timeout and generation setting rotation"""
     
     def __init__(self, base_url: str = "http://localhost:11434", api_key: Optional[str] = None, 
-                 initial_seed: int = 42, default_timeout: int = 180):  # NEW: Accept default timeout
+                 initial_seed: int = 42, default_timeout: int = 180):
         self.base_url = base_url
         self.api_key = api_key
         self.headers = {"Content-Type": "application/json"}
         self.current_seed = initial_seed
-        self.default_timeout = default_timeout  # NEW: Store default timeout
+        self.default_timeout = default_timeout
         
         if api_key:
             self.headers["Authorization"] = f"Bearer {api_key}"
         
         # Generation settings rotation for all attempts
         self.generation_settings = [
-            {"name": "balanced", "temperature": 0.33, "top_p": 0.92, "repeat_penalty": 1.3, "frequency_pnelaty": 1.3, "presence_penalty": 1.1, "top_k": 55},
-            {"name": "precise", "temperature": 0.13, "top_p": 0.78, "repeat_penalty": 1.3, "frequency_pnelaty": 1.3, "presence_penalty": 1.1, "top_k": 34},
-            {"name": "creative", "temperature": 0.45, "top_p": 0.95, "repeat_penalty": 1.3, "frequency_pnelaty": 1.3, "presence_penalty": 1.1, "top_k": 66}
-        ]
+            {"name": "balanced", "temperature": 0.33, "top_p": 0.92, "repeat_penalty": 1.3, "frequency_penalty": 1.3, "presence_penalty": 1.1, "top_k": 55},
+            {"name": "precise", "temperature": 0.13, "top_p": 0.78, "repeat_penalty": 1.4, "frequency_penalty": 1.4, "presence_penalty": 1.2, "top_k": 34},
+            {"name": "creative", "temperature": 0.45, "top_p": 0.95, "repeat_penalty": 1.2, "frequency_penalty": 1.2, "presence_penalty": 1.0, "top_k": 66}        ]
         self.current_setting_index = 0
     
     def _increment_seed(self):
@@ -405,10 +800,10 @@ class APIClient:
                    response_format: Optional[Dict] = None,
                    timeout: int = None,
                    max_retries: int = 3,
-                   stream: bool = False) -> Dict[str, Any]:  # ADD: stream parameter
+                   stream: bool = False) -> Dict[str, Any]:
         """Make a chat completion request with timeout and retry logic"""
         
-        # NEW: Use provided timeout or fall back to default
+        # Use provided timeout or fall back to default
         if timeout is None:
             timeout = self.default_timeout
         
@@ -426,7 +821,7 @@ class APIClient:
                 payload = {
                     "model": model,
                     "messages": messages,
-                    "stream": stream,  # ADD: streaming parameter
+                    "stream": stream,
                     **current_params
                 }
                 
@@ -452,11 +847,11 @@ class APIClient:
                     headers=self.headers, 
                     json=payload,
                     timeout=timeout,
-                    stream=stream  # ADD: stream to requests
+                    stream=stream
                 )
                 response.raise_for_status()
                 
-                # ADD: Handle streaming vs non-streaming responses
+                # Handle streaming vs non-streaming responses
                 if stream:
                     content = self._handle_streaming_response(response)
                     result = {
@@ -476,15 +871,7 @@ class APIClient:
                             continue
                         else:
                             print("⚠️  Returning invalid JSON after max retries")
-                """
-                # Check repetition for ALL responses
-                if self._has_repetition(content):
-                    print(f"⚠️  Detected repetition in response, retrying with different settings...")
-                    if attempt < max_retries - 1:
-                        continue
-                    else:
-                        print(f"⚠️  Max retries reached, using response with repetition")
-                """
+                
                 print(f"✅ Success with {setting_name}")
                 return result
                             
@@ -506,7 +893,6 @@ class APIClient:
                 else:
                     raise
 
-    # ADD: New method to handle streaming
     def _handle_streaming_response(self, response) -> str:
         """Handle streaming response with external monitor"""
         full_content = ""
@@ -543,127 +929,33 @@ class APIClient:
         print()
         return full_content
 
+class WhiteboardPipeline:
+    """Manages the whiteboard-based planning pipeline execution"""
     
-    def _has_repetition(self, text: str, threshold: int = 3) -> bool:
-        """Detect if text has problematic repetition"""
-        if not text or len(text) < 50:
-            return False
-            
-        # Check for repeated "further" pattern
-        words = text.lower().split()
-        if len(words) < 10:
-            return False
-            
-        # Count consecutive identical words
-        max_consecutive = 1
-        current_consecutive = 1
-        for i in range(1, len(words)):
-            if words[i] == words[i-1]:
-                current_consecutive += 1
-                max_consecutive = max(max_consecutive, current_consecutive)
-            else:
-                current_consecutive = 1
-                
-        if max_consecutive >= 3:  # 3+ consecutive identical words
-            return True
-            
-        # Keep existing sentence-based check
-        sentences = [s.strip() for s in text.split('.') if s.strip()]
-        if len(sentences) < 3:
-            return False
-            
-        sentence_counts = {}
-        for sentence in sentences:
-            if len(sentence) > 10:
-                sentence_counts[sentence] = sentence_counts.get(sentence, 0) + 1
-                
-        max_count = max(sentence_counts.values()) if sentence_counts else 1
-        return max_count >= threshold
-
-
-class PlanningPipeline:
-    """Manages the planning pipeline execution"""
-    
-    def __init__(self, reasoning_model: str, coding_model: str, api_client: APIClient):
+    def __init__(self, reasoning_model: str, coding_model: str, api_client: APIClient, whiteboard_manager: WhiteboardManager):
         self.reasoning_model = reasoning_model
         self.coding_model = coding_model
         self.api_client = api_client
-        
-        # Stage configuration: (model, use_structured_output, schema)
-        self.stages = [
-            ("planning", reasoning_model, True),
-            ("six_hats", reasoning_model, True),
-            ("dependency", reasoning_model, True),
-            ("architecture", reasoning_model, True),
-            ("context_code_structure", reasoning_model, True),
-            ("task_list", reasoning_model, True),
-            ("config", coding_model, True)
-        ]
+        self.whiteboard_manager = whiteboard_manager
     
-    def execute_stage(self, stage_name: str, messages: List[Dict], 
-                     use_structured: bool, schema: Optional[Dict] = None,
-                     **generation_params) -> Dict[str, Any]:
-        """Execute a single pipeline stage with simplified interface"""
+    def execute_stage(self, stage_name: str, paper_content: str, 
+                     prompt_func, schema: Optional[Dict] = None, **extra_args) -> Dict[str, Any]:
+        """Execute a single pipeline stage with whiteboard context"""
         
         model = self.reasoning_model if stage_name != "config" else self.coding_model
         
         print(f"[{stage_name.upper()}] Using {model}")
         
-        response_format = schema if use_structured else None
+        # Get current whiteboard state as YAML context
+        whiteboard_yaml = self.whiteboard_manager.get_whiteboard_yaml()
         
-        try:
-            completion = self.api_client.chat_completion(
-                model=model,
-                messages=messages,
-                response_format=response_format,
-                stream=True,  # ADD: stream parameter
-                **generation_params
-            )
-            
-            return {
-                'choices': [{
-                    'message': {
-                        'role': 'assistant',
-                        'content': completion['choices'][0]['message']['content']
-                    }
-                }],
-                'model_used': model,
-                'stage': stage_name
-            }
-            
-        except Exception as e:
-            print(f"Error in {stage_name} stage: {e}")
-            raise
-
-class EnhancedPlanningPipeline(PlanningPipeline):
-    """Enhanced pipeline that uses configuration-driven stage execution"""
-        
-    def execute_stage_from_config(self, stage_name: str, paper_content: str, 
-                                 structured_responses: Dict[str, Any], **extra_args) -> Dict[str, Any]:
-        """Execute a stage using pipeline configuration"""
-        
-        # Get stage configuration
-        model_type = PipelineConfig.get_stage_model(stage_name)
-        schema_name = PipelineConfig.get_stage_schema(stage_name)
-        prompt_func_name = PipelineConfig.get_stage_prompt_func(stage_name)
-        
-        # Import the required schema and prompt function dynamically
-        import prompts  # FIXED: Import the module directly
-        schema = getattr(prompts, schema_name) if schema_name else None
-        prompt_func = getattr(prompts, prompt_func_name)
-        
-        # Build prompt arguments dynamically
-        prompt_args = PipelineConfig.get_prompt_args(
-            stage_name, paper_content, structured_responses, **extra_args
-        )
-        
-        # Generate messages
-        messages = prompt_func(*prompt_args)
-        
-        # Execute with appropriate model
-        model = self.reasoning_model if model_type == 'reasoning' else self.coding_model
-        
-        print(f"[{stage_name.upper()}] Using {model}")
+        # Generate messages with whiteboard context
+        if stage_name in ['analysis']:
+            # Analysis needs file-specific args
+            messages = prompt_func(paper_content, whiteboard_yaml, **extra_args)
+        else:
+            # Other stages just need paper and whiteboard
+            messages = prompt_func(paper_content, whiteboard_yaml)
         
         try:
             completion = self.api_client.chat_completion(
@@ -673,24 +965,45 @@ class EnhancedPlanningPipeline(PlanningPipeline):
                 stream=True
             )
             
+            # Parse response and extract updates
+            response_content = completion['choices'][0]['message']['content']
+            structured_data = parse_structured_response(response_content)
+            
+            # Apply whiteboard updates if present
+            updates = structured_data.get('updates', [])
+            if updates and isinstance(updates, list):
+                print(f"📝 Applying {len(updates)} whiteboard updates...")
+                self.whiteboard_manager.apply_updates(updates)
+                
+                # Show applied updates
+                for update in updates[:3]:  # Show first 3
+                    print(f"   • {update}")
+                if len(updates) > 3:
+                    print(f"   • ... and {len(updates) - 3} more")
+            elif updates:
+                print(f"⚠️ Updates field is not a list: {type(updates)}")
+            
+            # Add stage completion marker
+            self.whiteboard_manager.add_stage_completion(stage_name, structured_data)
+            
             return {
                 'choices': [{
                     'message': {
                         'role': 'assistant',
-                        'content': completion['choices'][0]['message']['content']
+                        'content': response_content
                     }
                 }],
                 'model_used': model,
-                'stage': stage_name
+                'stage': stage_name,
+                'whiteboard_updates_applied': len(updates) if isinstance(updates, list) else 0
             }
             
         except Exception as e:
             print(f"Error in {stage_name} stage: {e}")
             raise
-     
 
 class ArtifactManager:
-    """Handles saving and loading of pipeline artifacts"""
+    """Handles saving and loading of pipeline artifacts with whiteboard integration"""
     
     def __init__(self, output_dir: str):
         self.output_dir = output_dir
@@ -715,7 +1028,6 @@ class ArtifactManager:
             json.dump(structured_data, f, indent=2)
         
         print(f"✅ Saved {stage_name} structured data to {filepath}")
-    
     def save_trajectories(self, trajectories: List[Dict]) -> None:
         """Save complete conversation trajectories"""
         filepath = os.path.join(self.output_dir, "planning_trajectories.json")
@@ -724,15 +1036,30 @@ class ArtifactManager:
             json.dump(trajectories, f, indent=2)
         
         print(f"✅ Saved trajectories to {filepath}")
-    
+        
     def save_config_yaml(self, config_content: str) -> None:
-        """Save the configuration YAML file"""
-        filepath = os.path.join(self.output_dir, "planning_config.yaml")
+            """Save the configuration YAML file"""
+            filepath = os.path.join(self.output_dir, "planning_config.yaml")
+            
+            with open(filepath, 'w') as f:
+                f.write(config_content)
+            
+            print(f"✅ Saved config YAML to {filepath}")
+    
+    def save_model_config(self, reasoning_model: str, coding_model: str) -> None:
+        """Save the model configuration used in the pipeline"""
+        model_config = {
+            'reasoning_model': reasoning_model,
+            'coding_model': coding_model,
+            'timestamp': time.time()
+        }
+        
+        filepath = os.path.join(self.output_dir, "model_config.json")
         
         with open(filepath, 'w') as f:
-            f.write(config_content)
+            json.dump(model_config, f, indent=2)
         
-        print(f"✅ Saved config YAML to {filepath}")
+        print(f"✅ Saved model config to {filepath}")
     
     def save_analysis_response(self, filename: str, response: Dict[str, Any]) -> None:
         """Save individual analysis response for a specific file"""
@@ -754,83 +1081,48 @@ class ArtifactManager:
         
         print(f"✅ Saved analysis structured data for {filename}")
     
-    def load_structured_responses(self) -> Dict[str, Any]:
-        """Load all structured responses from previous stages"""
-        filepath = os.path.join(self.output_dir, "all_structured_responses.json")
-        
-        try:
-            with open(filepath, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            print(f"Warning: No structured responses found at {filepath}")
-            return {}
+    def get_task_list_from_whiteboard(self, whiteboard_manager: WhiteboardManager) -> List[str]:
+        """Extract task list from whiteboard state"""
+        whiteboard = whiteboard_manager.load_whiteboard()
+        return whiteboard.get('knowledge', {}).get('task_list', [])
     
-    def get_task_list_from_responses(self, structured_responses: Dict[str, Any]) -> List[str]:
-        """Extract task list from structured responses"""
-        task_list_data = structured_responses.get('task_list', {})
-        return task_list_data.get('task_list', [])
-    
-    def get_logic_analysis_from_responses(self, structured_responses: Dict[str, Any]) -> Dict[str, str]:
-        """Extract logic analysis mapping from structured responses"""
-        task_list_data = structured_responses.get('task_list', {})
-        logic_analysis = task_list_data.get('logic_analysis', [])
+    def get_logic_analysis_from_whiteboard(self, whiteboard_manager: WhiteboardManager) -> Dict[str, str]:
+        """Extract logic analysis mapping from whiteboard state"""
+        whiteboard = whiteboard_manager.load_whiteboard()
+        logic_analysis = whiteboard.get('knowledge', {}).get('logic_analysis', [])
         
         logic_dict = {}
         for desc in logic_analysis:
-            if len(desc) >= 2:
+            if isinstance(desc, list) and len(desc) >= 2:
                 logic_dict[desc[0]] = desc[1]
-            else:
-                logic_dict[desc[0]] = ""
+            elif isinstance(desc, dict) and 'filename' in desc and 'description' in desc:
+                logic_dict[desc['filename']] = desc['description']
         
         return logic_dict
-    
-    def get_task_metadata_from_responses(self, structured_responses: Dict[str, Any]) -> Dict[str, Dict]:
-        """Extract task metadata mapping from structured responses"""
-        task_list_data = structured_responses.get('task_list', {})
-        task_metadata = task_list_data.get('task_metadata', [])
         
-        metadata_dict = {}
-        for meta in task_metadata:
-            if 'filename' in meta:
-                metadata_dict[meta['filename']] = {
-                    'critical_path': meta.get('critical_path', False),
-                    'priority': meta.get('priority', 'medium'),
-                    'utility': meta.get('utility', 'medium'), 
-                    'effort': meta.get('effort', 'medium')
-                }
+    def check_analysis_completion(self, file_list: List[str]) -> bool:
+        """Check if analysis phase is complete for all specified files"""
+        if not file_list:
+            return False
+            
+        for filename in file_list:
+            if filename == "config.yaml":
+                continue
+                
+            safe_filename = filename.replace("/", "_").replace("\\", "_")
+            analysis_response_file = os.path.join(self.output_dir, f"{safe_filename}_simple_analysis_response.json")
+            analysis_structured_file = os.path.join(self.output_dir, f"{safe_filename}_simple_analysis_structured.json")
+            
+            if not os.path.exists(analysis_response_file) or not os.path.exists(analysis_structured_file):
+                return False
         
-        return metadata_dict
-    
-    def save_model_config(self, reasoning_model: str, coding_model: str) -> None:
-        """Save model configuration"""
-        model_config = {
-            "reasoning_model": reasoning_model,
-            "coding_model": coding_model,
-            "stage_assignments": {
-                "planning": reasoning_model,
-                "six_hats": reasoning_model,
-                "dependency": reasoning_model,
-                "architecture": reasoning_model, 
-                "context_code_structure": reasoning_model,
-                "task_list": reasoning_model,
-                "analysis": reasoning_model,
-                "config": coding_model
-            }
-        }
-        
-        filepath = os.path.join(self.output_dir, "model_config.json")
-        
-        with open(filepath, 'w') as f:
-            json.dump(model_config, f, indent=2)
-        
-        print(f"✅ Saved model config to {filepath}")
+        return True
 
-    # 1. Add this function to ArtifactManager class:
-    def get_utility_descriptions_from_analysis(self, task_list: List[str]) -> Dict[str, str]:
-        """Extract utility descriptions from analysis files"""
+    def get_utility_descriptions_from_analysis(self, file_list: List[str]) -> Dict[str, str]:
+        """Extract utility descriptions from analysis files for specified files"""
         utility_descriptions = {}
         
-        for filename in task_list:
+        for filename in file_list:
             if filename == "config.yaml":
                 continue
                 
@@ -853,24 +1145,6 @@ class ArtifactManager:
                 utility_descriptions[filename] = f"Core implementation for {filename}"
         
         return utility_descriptions
-
-    def check_analysis_completion(self, task_list: List[str]) -> bool:
-        """Check if analysis phase is complete for all tasks"""
-        if not task_list:
-            return False
-            
-        for filename in task_list:
-            if filename == "config.yaml":
-                continue
-                
-            safe_filename = filename.replace("/", "_").replace("\\", "_")
-            analysis_response_file = os.path.join(self.output_dir, f"{safe_filename}_simple_analysis_response.json")
-            analysis_structured_file = os.path.join(self.output_dir, f"{safe_filename}_simple_analysis_structured.json")
-            
-            if not os.path.exists(analysis_response_file) or not os.path.exists(analysis_structured_file):
-                return False
-        
-        return True
 
     def save_file_organization_response(self, response: Dict[str, Any]) -> None:
         """Save file organization response"""
@@ -902,40 +1176,204 @@ class ArtifactManager:
             print(f"Warning: No file organization found at {filepath}")
             return []
 
-
-class CodingPipeline:
-    """Manages parallel code generation with structured responses and diff output"""
+def load_context_and_analysis_from_whiteboard(output_dir: str, whiteboard_manager: WhiteboardManager) -> Tuple[Dict[str, Any], Dict[str, str], Dict[str, str]]:
+    """Load context and analysis data from whiteboard state"""
     
+    # Get task list from whiteboard
+    whiteboard = whiteboard_manager.load_whiteboard()
+    knowledge = whiteboard.get('knowledge', {})
+    
+    # Handle case where knowledge might be a JSON string
+    if isinstance(knowledge, str):
+        try:
+            knowledge = json.loads(knowledge)
+        except json.JSONDecodeError:
+            knowledge = {}
+    
+    task_list_raw = knowledge.get('task_list', [])
+    
+    # Handle case where task_list might be stored as JSON string
+    if isinstance(task_list_raw, str):
+        try:
+            task_list = json.loads(task_list_raw)
+        except json.JSONDecodeError:
+            task_list = []
+    else:
+        task_list = task_list_raw if isinstance(task_list_raw, list) else []
+    
+    # Get development order from whiteboard
+    dev_order_raw = knowledge.get('development_order', [])
+    if isinstance(dev_order_raw, str):
+        try:
+            development_order = json.loads(dev_order_raw)
+        except json.JSONDecodeError:
+            development_order = []
+    else:
+        development_order = dev_order_raw if isinstance(dev_order_raw, list) else []
+    
+    # Use development order if available, otherwise fall back to task list
+    files_to_process = development_order if development_order else task_list
+    
+    print(f"📋 Task list contains {len(task_list)} items")
+    print(f"📋 Development order contains {len(development_order)} items")
+    print(f"📋 Processing {len(files_to_process)} files for coding")
+    
+    # Load analysis for each file to process
+    detailed_logic_analysis_dict = {}
+    for todo_file_name in files_to_process:
+        if todo_file_name == "config.yaml":
+            continue
+            
+        safe_filename = todo_file_name.replace("/", "_").replace("\\", "_")
+        analysis_file = f"{output_dir}/{safe_filename}_simple_analysis_response.json"
+        
+        if os.path.exists(analysis_file):
+            with open(analysis_file) as f:
+                analysis_response = json.load(f)
+            detailed_logic_analysis_dict[todo_file_name] = analysis_response[0]['choices'][0]['message']['content']
+            print(f"   ✅ Loaded analysis for {todo_file_name}")
+        else:
+            print(f"   ⚠️  No analysis file found for {todo_file_name}, creating placeholder")
+            detailed_logic_analysis_dict[todo_file_name] = f"No detailed analysis found for {todo_file_name}. This file should implement core functionality as specified in the whiteboard knowledge."
+    
+    # Load utility descriptions from analysis structured data
+    artifact_manager = ArtifactManager(output_dir)
+    utility_descriptions = artifact_manager.get_utility_descriptions_from_analysis(files_to_process)
+    
+    # Context is now just whiteboard YAML and the files being processed
+    context = {
+        'task_list': files_to_process,  # Use the files we're actually processing
+        'whiteboard_yaml': whiteboard_manager.get_whiteboard_yaml()
+    }
+    
+    print(f"📋 Loaded context from whiteboard with {len(files_to_process)} files to process")
+    
+    return context, detailed_logic_analysis_dict, utility_descriptions
+    
+# Coding Pipeline Classes (Enhanced with Whiteboard)
+class CodingPipeline:
     def __init__(self, api_client: APIClient, coding_model: str, output_dir: str, 
-                 output_repo_dir: str, max_parallel: int = 4):
+                 output_repo_dir: str, max_parallel: int = 4, max_context_tokens: int = 128000,
+                 whiteboard_manager: WhiteboardManager = None):
         self.api_client = api_client
         self.coding_model = coding_model
         self.output_dir = output_dir
         self.output_repo_dir = output_repo_dir
         self.max_parallel = max_parallel
+        self.max_context_tokens = max_context_tokens
+        self.whiteboard_manager = whiteboard_manager
         self.done_files = ['config.yaml']
         self.done_file_dict = {}
+        
+        # Smart context tracking
+        self.interface_context = {
+            'exports': {},  # file -> {classes: [], functions: [], constants: []}
+            'imports': {},  # file -> {dependencies: [...]}
+            'handoff_notes': []  # Accumulated integration guidance
+        }
         
         # Create output directories
         os.makedirs(output_repo_dir, exist_ok=True)
         os.makedirs(f"{output_dir}/coding_artifacts", exist_ok=True)
         os.makedirs(f"{output_dir}/diffs", exist_ok=True)
         os.makedirs(f"{output_dir}/structured_code_responses", exist_ok=True)
-    
+        os.makedirs(f"{output_dir}/interface_context", exist_ok=True)
+        
+    def estimate_tokens(self, text: str) -> int:
+        """Rough token estimation (4 chars per token average)"""
+        return len(text) // 4
+        
+    def build_interface_context_summary(self) -> str:
+        """Build compact interface summary instead of full code context"""
+        if not self.interface_context['exports']:
+            return ""
+        
+        summary = "\n## Previously Generated Files - Interface Context\n"
+        
+        # Show what each file exports
+        for filename, exports in self.interface_context['exports'].items():
+            summary += f"\n### {filename} (Provides)\n"
+            
+            if exports.get('classes'):
+                summary += "**Classes & Methods:**\n"
+                for class_info in exports['classes']:
+                    summary += f"- {class_info}\n"
+            
+            if exports.get('functions'):
+                summary += "**Functions:**\n"
+                for func_info in exports['functions']:
+                    summary += f"- {func_info}\n"
+            
+            if exports.get('constants'):
+                summary += "**Constants:**\n"
+                for const_info in exports['constants']:
+                    summary += f"- {const_info}\n"
+        
+        # Show dependency patterns
+        summary += "\n### Integration Patterns\n"
+        for filename, imports in self.interface_context['imports'].items():
+            if imports.get('dependencies'):
+                summary += f"\n**{filename} depends on:**\n"
+                for dep in imports['dependencies']:
+                    summary += f"- {dep['from_file']}: {', '.join(dep['imports'])} ({dep['usage_context']})\n"
+        
+        # Add accumulated handoff notes
+        if self.interface_context['handoff_notes']:
+            summary += "\n### Integration Guidance\n"
+            for i, note in enumerate(self.interface_context['handoff_notes'], 1):
+                summary += f"{i}. {note}\n"
+        
+        summary += "\n-----\n"
+        return summary
+                
     def extract_code_from_structured_response(self, structured_data: Dict[str, Any], filename: str) -> str:
-        """Extract code from structured response"""
+        """Extract code from structured response - BACK TO ORIGINAL SIMPLE FORMAT"""
         files = structured_data.get('files', [])
         
         for file_data in files:
-            if file_data.get('file_name') == filename:
-                return file_data.get('diff_file', '')
+            # Handle case where file_data might be a list instead of dict
+            if isinstance(file_data, list):
+                # Skip malformed entries
+                print(f"   ⚠️  Skipping malformed file_data (list): {file_data}")
+                continue
+            elif isinstance(file_data, dict):
+                if file_data.get('file_name') == filename:
+                    diff_file = file_data.get('diff_file', '')
+                    # Handle case where LLM returns array instead of string
+                    if isinstance(diff_file, list):
+                        return '\n'.join(str(line) for line in diff_file)
+                    return str(diff_file)
+            else:
+                print(f"   ⚠️  Unexpected file_data type: {type(file_data)}")
+                continue
         
         # Fallback - return first file if exact match not found
         if files:
-            return files[0].get('diff_file', '')
+            first_file = files[0]
+            if isinstance(first_file, dict):
+                diff_file = first_file.get('diff_file', '')
+                if isinstance(diff_file, list):
+                    return '\n'.join(str(line) for line in diff_file)
+                return str(diff_file)
+            elif isinstance(first_file, list):
+                # If it's a list, try to join it as code
+                return '\n'.join(str(item) for item in first_file)
         
+        print(f"   ⚠️  No code found for {filename}")
         return ""
-    
+
+    def update_interface_context(self, filename: str, structured_data: Dict[str, Any]):
+        """Update interface context with new file's interface information"""
+        # Update whiteboard with interface context
+        if self.whiteboard_manager:
+            updates = [
+                f"coding.interfaces.{filename.replace('.', '_').replace('/', '_')}.exported=true",
+                f"coding.progress.completed_files.{len(self.done_files)}={filename}"
+            ]
+            # Ensure we only pass strings to apply_updates
+            string_updates = [str(update) for update in updates if isinstance(update, (str, int, float, bool))]
+            self.whiteboard_manager.apply_updates(string_updates)
+
     def create_diff_file(self, filename: str, code: str) -> str:
         """Create a diff file for the generated code"""
         # Code is already in diff format from structured response
@@ -975,79 +1413,39 @@ class CodingPipeline:
         
         return '\n'.join(code_lines)
     
-    # Then update the generate_single_file call to:
     def generate_single_file(self, file_info: Tuple[str, str, str], shared_context: Dict[str, str]) -> Dict[str, Any]:
-        """Generate code for a single file using structured response with enhanced context accumulation"""
+        """Generate code for a single file using smart interface context and whiteboard"""
         todo_file_name, detailed_logic_analysis, utility_description = file_info
         
         try:
             print(f"\n[CODING] {todo_file_name}")
             print(f"   Utility: {utility_description[:100]}{'...' if len(utility_description) > 100 else ''}")
-            if len(self.done_files) > 1:  # More than just config.yaml
-                print(f"   📚 Context: Informed by {len(self.done_files)-1} previously generated files")
             
-            # Build comprehensive context of previously implemented files
-            code_files = ""
-            if len(self.done_files) > 1:  # More than just config.yaml
-                code_files += "\n## Previously Generated Files (For Context & Integration)\n"
-                
-                for i, done_file in enumerate(self.done_files, 1):
-                    if done_file.endswith(".yaml"):
-                        continue
-                    if done_file in self.done_file_dict:
-                        file_code = self.done_file_dict[done_file]
-                        
-                        # Include full code for recent files, summarized for older files
-                        if i <= 3:  # Full code for last 3 files
-                            code_files += f"""
-    ### {done_file} (Full Implementation)
-    ```python
-    {file_code}
-    ```
-
-    """
-                        else:  # Summarized for older files to manage context
-                            # Extract class/function signatures for context
-                            lines = file_code.split('\n')
-                            signatures = []
-                            for line in lines:
-                                stripped = line.strip()
-                                if (stripped.startswith('class ') or 
-                                    stripped.startswith('def ') or 
-                                    stripped.startswith('async def ')):
-                                    signatures.append(line)
-                            
-                            code_files += f"""
-    ### {done_file} (Key Signatures)
-    ```python
-    {chr(10).join(signatures[:10])}  # ... (truncated for context management)
-    ```
-
-    """
-                
-                code_files += """
-    **INTEGRATION GUIDANCE**: The above files show the established patterns, interfaces, and design decisions. Ensure your implementation integrates seamlessly with these existing components.
-
-    -----
-    """
+            # Build smart interface context (much smaller than full code)
+            interface_summary = self.build_interface_context_summary()
+            interface_tokens = self.estimate_tokens(interface_summary)
             
-            # Generate prompt using the enhanced function with dynamic context
-            from prompts import get_coding_prompt, CODE_SCHEMA
-            messages = get_coding_prompt(
-                todo_file_name, 
-                detailed_logic_analysis,
-                utility_description,
-                shared_context['paper_content'],
-                shared_context['config_yaml'],
-                shared_context,  # Pass entire context instead of individual keys
-                code_files
+            if len(self.done_files) > 1:
+                print(f"   📚 Interface Context: {len(self.interface_context['exports'])} files, ~{interface_tokens:,} tokens")
+            
+            # Generate prompt with smart context management and whiteboard
+            from prompts import get_coding_prompt_smart_context, CODE_SCHEMA
+            messages = get_coding_prompt_smart_context(
+                todo_file_name=todo_file_name,
+                detailed_logic_analysis=detailed_logic_analysis,
+                utility_description=utility_description,
+                paper_content=shared_context['paper_content'],
+                config_yaml=shared_context['config_yaml'],
+                shared_context=shared_context,
+                interface_context=interface_summary,
+                max_context_tokens=self.max_context_tokens
             )
             
-            # Make API call with structured response
+            # Make API call with enhanced structured response
             completion = self.api_client.chat_completion(
                 model=self.coding_model,
                 messages=messages,
-                response_format=CODE_SCHEMA,  # Use structured output
+                response_format=CODE_SCHEMA,
                 stream=True
             )
             
@@ -1055,29 +1453,40 @@ class CodingPipeline:
             content = completion['choices'][0]['message']['content']
             structured_data = parse_structured_response(content)
             
+            # Apply whiteboard updates if present
+            updates = structured_data.get('updates', [])
+            if updates and self.whiteboard_manager:
+                if isinstance(updates, list):
+                    print(f"📝 Applying {len(updates)} coding whiteboard updates...")
+                    self.whiteboard_manager.apply_updates(updates)
+                else:
+                    print(f"⚠️ Updates field is not a list: {type(updates)} - converting")
+                    if isinstance(updates, str):
+                        self.whiteboard_manager.apply_updates([updates])
+            
             # Extract information from structured response
             deliberation = structured_data.get('deliberation', '')
             utility = structured_data.get('utility', '')
             diff_code = self.extract_code_from_structured_response(structured_data, todo_file_name)
             
+            # Update interface context for next iterations
+            self.update_interface_context(todo_file_name, structured_data)
+            
             # Convert diff to clean code
             clean_code = self.clean_diff_to_code(diff_code)
             
-            # Create diff file (keep original diff format)
+            # Create diff file and save artifacts
             diff_path = self.create_diff_file(todo_file_name, diff_code)
             
             # Save artifacts
             safe_filename = todo_file_name.replace("/", "_").replace("\\", "_")
             
-            # Save structured response
             with open(f"{self.output_dir}/structured_code_responses/{safe_filename}_structured.json", 'w') as f:
                 json.dump(structured_data, f, indent=2)
             
-            # Save full response
             with open(f"{self.output_dir}/coding_artifacts/{safe_filename}_coding.txt", 'w') as f:
                 f.write(content)
             
-            # Save deliberation and utility separately for easy access
             with open(f"{self.output_dir}/coding_artifacts/{safe_filename}_deliberation.txt", 'w') as f:
                 f.write(f"DELIBERATION:\n{deliberation}\n\nUTILITY:\n{utility}")
             
@@ -1089,7 +1498,7 @@ class CodingPipeline:
             with open(f"{self.output_repo_dir}/{todo_file_name}", 'w') as f:
                 f.write(clean_code)
             
-            # Add to done files for subsequent iterations (ACCUMULATING CONTEXT)
+            # Add to done files
             self.done_files.append(todo_file_name)
             self.done_file_dict[todo_file_name] = clean_code
             
@@ -1103,7 +1512,8 @@ class CodingPipeline:
                 'utility': utility,
                 'structured_data': structured_data,
                 'content': content,
-                'context_files_count': len([f for f in self.done_files if not f.endswith('.yaml')])
+                'interface_tokens': interface_tokens,
+                'whiteboard_updates': len(updates) if isinstance(updates, list) else 0
             }
             
         except Exception as e:
@@ -1114,7 +1524,7 @@ class CodingPipeline:
                 'error': str(e),
                 'diff_path': None
             }
-    
+
     def process_files_parallel(self, file_tasks: List[Tuple[str, str, str]], 
                               shared_context: Dict[str, str]) -> List[Dict[str, Any]]:
         """Process multiple files in parallel with structured responses and RESUME capability"""
@@ -1164,7 +1574,8 @@ class CodingPipeline:
                         'utility': structured_data.get('utility', utility_description),
                         'deliberation': structured_data.get('deliberation', 'Previously completed'),
                         'structured_data': structured_data,
-                        'resumed': True  # Flag to indicate this was resumed
+                        'resumed': True,
+                        'whiteboard_updates': 0
                     })
                     
                 except Exception as e:
@@ -1213,6 +1624,8 @@ class CodingPipeline:
                                 self.done_file_dict[result['filename']] = result['code']
                                 print(f"   ✅ Generated: {result['filename']}")
                                 print(f"      Utility: {result.get('utility', 'N/A')[:80]}{'...' if len(result.get('utility', '')) > 80 else ''}")
+                                if result.get('whiteboard_updates', 0) > 0:
+                                    print(f"      Whiteboard updates: {result['whiteboard_updates']}")
                             else:
                                 print(f"   ❌ Failed: {result['filename']}")
                                 
@@ -1254,895 +1667,44 @@ class CodingPipeline:
         
         return all_results
 
-
-
-# functions.py - Missing functions and updates
-
-# 1. Add this function to ArtifactManager class:
-def get_utility_descriptions_from_analysis(self, task_list: List[str]) -> Dict[str, str]:
-    """Extract utility descriptions from analysis files"""
-    utility_descriptions = {}
-    
-    for filename in task_list:
-        if filename == "config.yaml":
-            continue
-            
-        safe_filename = filename.replace("/", "_").replace("\\", "_")
-        analysis_file = os.path.join(self.output_dir, f"{safe_filename}_simple_analysis_structured.json")
-        
-        if os.path.exists(analysis_file):
-            try:
-                with open(analysis_file, 'r') as f:
-                    analysis_data = json.load(f)
-                
-                # Extract core functionality as utility description
-                core_functionality = analysis_data.get('core_functionality', '')
-                utility_descriptions[filename] = core_functionality
-                
-            except Exception as e:
-                print(f"Warning: Could not load analysis for {filename}: {e}")
-                utility_descriptions[filename] = f"Core implementation for {filename}"
-        else:
-            utility_descriptions[filename] = f"Core implementation for {filename}"
-    
-    return utility_descriptions
-
-def check_analysis_completion(self, task_list: List[str]) -> bool:
-    """Check if analysis phase is complete for all tasks"""
-    if not task_list:
-        return False
-        
-    for filename in task_list:
-        if filename == "config.yaml":
-            continue
-            
-        safe_filename = filename.replace("/", "_").replace("\\", "_")
-        analysis_response_file = os.path.join(self.output_dir, f"{safe_filename}_simple_analysis_response.json")
-        analysis_structured_file = os.path.join(self.output_dir, f"{safe_filename}_simple_analysis_structured.json")
-        
-        if not os.path.exists(analysis_response_file) or not os.path.exists(analysis_structured_file):
-            return False
-    
-    return True
-
-# 2. Update the load_context_and_analysis function signature to return utility descriptions:
-def load_context_and_analysis(output_dir: str) -> Tuple[Dict[str, Any], Dict[str, str], Dict[str, str]]:
-    """Load planning context, analysis data, and utility descriptions dynamically"""
-    
-    # Load structured responses
-    with open(f"{output_dir}/all_structured_responses.json") as f:
-        structured_responses = json.load(f)
-    
-    # Build context dynamically from whatever structured responses exist
-    context = {'task_list': []}  # Initialize with task_list
-    
-    # For each stage that exists, create a formatted context entry
-    for stage_name, stage_data in structured_responses.items():
-        context_key = f"context_{stage_name}"
-        # Format the structured data as YAML-style for context
-        context[context_key] = format_dict_as_yaml_style(stage_data, stage_name)
-        print(f"   + Built {context_key} from {stage_name} stage")
-    
-    # Get task list (still needed for analysis loading)
-    task_list_data = structured_responses.get('task_list', {})
-    task_list = task_list_data.get('task_list', [])
-    context['task_list'] = task_list
-    
-    # Load analysis for each file (this part stays the same)
-    detailed_logic_analysis_dict = {}
-    for todo_file_name in task_list:
-        if todo_file_name == "config.yaml":
-            continue
-            
-        safe_filename = todo_file_name.replace("/", "_").replace("\\", "_")
-        analysis_file = f"{output_dir}/{safe_filename}_simple_analysis_response.json"
-        
-        if os.path.exists(analysis_file):
-            with open(analysis_file) as f:
-                analysis_response = json.load(f)
-            detailed_logic_analysis_dict[todo_file_name] = analysis_response[0]['choices'][0]['message']['content']
-        else:
-            detailed_logic_analysis_dict[todo_file_name] = f"No detailed analysis found for {todo_file_name}"
-    
-    # Load utility descriptions from analysis structured data
-    artifact_manager = ArtifactManager(output_dir)
-    utility_descriptions = artifact_manager.get_utility_descriptions_from_analysis(task_list)
-    
-    print(f"📋 Loaded context dynamically with {len([k for k in context.keys() if k.startswith('context_')])} context stages")
-    
-    return context, detailed_logic_analysis_dict, utility_descriptions
-
-# AutoGen
-
-# Add these imports to the top of your functions.py (after your existing imports)
-import autogen
-from autogen import AssistantAgent, UserProxyAgent, GroupChat, GroupChatManager
-from autogen.cache import Cache
-import tempfile
-import subprocess
-import sys
-from io import StringIO
-import contextlib
-
-# Add these classes to your functions.py file
-
-class CodeEvaluator:
-    """Tool for executing and evaluating Python code safely"""
-    
-    def __init__(self, work_dir: str = None):
-        self.work_dir = work_dir or tempfile.mkdtemp()
-        os.makedirs(self.work_dir, exist_ok=True)
-    
-    def execute_code(self, code: str, filename: str = "test_code.py") -> Dict[str, Any]:
-        """Execute Python code and return results"""
-        try:
-            # Create a temporary file for the code
-            code_path = os.path.join(self.work_dir, filename)
-            with open(code_path, 'w') as f:
-                f.write(code)
-            
-            # Capture stdout and stderr
-            result = subprocess.run(
-                [sys.executable, code_path],
-                cwd=self.work_dir,
-                capture_output=True,
-                text=True
-            )
-            
-            return {
-                'success': result.returncode == 0,
-                'stdout': result.stdout,
-                'stderr': result.stderr,
-                'return_code': result.returncode,
-                'execution_time': 'completed'
-            }
-            
-        except Exception as e:
-            return {
-                'success': False,
-                'stdout': '',
-                'stderr': f'Execution error: {str(e)}',
-                'return_code': -1,
-                'execution_time': 'error'
-            }
-    
-    def validate_imports(self, code: str) -> Dict[str, Any]:
-        """Check if all imports in code are available"""
-        try:
-            # Extract import statements
-            import_lines = []
-            for line in code.split('\n'):
-                line = line.strip()
-                if line.startswith('import ') or line.startswith('from '):
-                    import_lines.append(line)
-            
-            # Test imports
-            test_code = '\n'.join(import_lines) + '\nprint("Imports successful")'
-            result = self.execute_code(test_code, "test_imports.py")
-            
-            return {
-                'imports_valid': result['success'],
-                'import_errors': result['stderr'] if not result['success'] else '',
-                'tested_imports': import_lines
-            }
-            
-        except Exception as e:
-            return {
-                'imports_valid': False,
-                'import_errors': str(e),
-                'tested_imports': []
-            }
-
-
-class AutoGenCodingPipeline:
-    """Enhanced coding pipeline using AutoGen agents that integrates with existing CodingPipeline"""
-    
-    def __init__(self, api_client: APIClient, coding_model: str, output_dir: str, 
-                 output_repo_dir: str, cache_seed: int = 42):
-        self.api_client = api_client
-        self.coding_model = coding_model
-        self.output_dir = output_dir
-        self.output_repo_dir = output_repo_dir
-        self.cache_seed = cache_seed
-        
-        # Create output directories (same as your CodingPipeline)
-        os.makedirs(output_repo_dir, exist_ok=True)
-        os.makedirs(f"{output_dir}/autogen_artifacts", exist_ok=True)
-        os.makedirs(f"{output_dir}/coding_artifacts", exist_ok=True)
-        os.makedirs(f"{output_dir}/diffs", exist_ok=True)
-        os.makedirs(f"{output_dir}/structured_code_responses", exist_ok=True)
-        
-        # Initialize code evaluator
-        self.evaluator = CodeEvaluator(f"{output_dir}/temp_execution")
-        
-        # Setup AutoGen configuration
-        self.autogen_config = self._setup_autogen_config()
-        
-        # Initialize agents
-        self._setup_agents()
-        
-        # Track completed files (same as your CodingPipeline)
-        self.done_files = ['config.yaml']
-        self.done_file_dict = {}
-        # AutoGen config should respect APIClient's timeout
-        self.autogen_config = [{
-            "model": self.coding_model,
-            "base_url": f"{self.api_client.base_url}/v1",
-            "api_key": self.api_client.api_key or "ollama",
-            "temperature": 0.1,
-            "seed": self.cache_seed,
-            "timeout": self.api_client.default_timeout  # NEW: Use APIClient's timeout
-        }]
-    def _setup_autogen_config(self) -> List[Dict]:
-        """Convert your APIClient configuration to AutoGen format"""
-        return [{
-            "model": self.coding_model,
-            "base_url": f"{self.api_client.base_url}/v1",
-            "api_key": self.api_client.api_key or "ollama",
-            "temperature": 0.1,
-            "seed": self.cache_seed
-        }]
-    
-    def _setup_agents(self):
-        """Initialize AutoGen agents with research pipeline focus"""
-        
-        # Engineer Agent
-        self.engineer = AssistantAgent(
-            name="Engineer",
-            llm_config={
-                "config_list": self.autogen_config,
-                "cache_seed": self.cache_seed,
-            },
-            system_message="""
-You are an expert Python engineer specializing in research paper implementations.
-
-Your expertise includes:
-- Translating research methodologies into clean, efficient Python code
-- Writing modular, well-documented code with comprehensive docstrings
-- Following software engineering best practices and PEP 8
-- Implementing machine learning and data processing pipelines
-- Creating robust, testable code architectures
-
-Key requirements for your code:
-- Write complete, functional code (no TODOs or placeholders)
-- Include proper type hints and comprehensive docstrings
-- Add appropriate error handling and input validation
-- Make code modular and reusable
-- Follow the provided UML design and architecture specifications
-- Ensure compatibility with the configuration provided
-
-Focus on producing production-quality code that accurately implements the research methodology.
-            """.strip()
-        )
-        
-        # Critic Agent
-        self.critic = AssistantAgent(
-            name="Critic",
-            llm_config={
-                "config_list": self.autogen_config,
-                "cache_seed": self.cache_seed,
-            },
-            system_message="""
-You are an expert code reviewer specializing in research implementations.
-
-Your task is to thoroughly evaluate code across multiple dimensions:
-
-**Code Quality Dimensions (Score 1-10 for each):**
-- **functionality**: Does the code correctly implement the research methodology?
-- **code_structure**: Is the code well-organized, modular, and maintainable?
-- **documentation**: Are docstrings, comments, and type hints comprehensive?
-- **error_handling**: Does the code handle edge cases and errors appropriately?
-- **performance**: Is the implementation efficient and scalable?
-- **compliance**: Does the code follow the specified architecture and requirements?
-
-**Response Format:**
-Provide scores as: {functionality: X, code_structure: X, documentation: X, error_handling: X, performance: X, compliance: X}
-
-After scoring, provide:
-- **Strengths**: What the code does well
-- **Issues**: Specific problems that need fixing
-- **Recommendations**: Concrete actions to improve the code
-
-If ANY critical bugs exist that prevent the code from running, functionality score MUST be < 5.
-            """.strip()
-        )
-        
-        # User Proxy Agent
-        self.user_proxy = UserProxyAgent(
-            name="CodeExecutor",
-            code_execution_config={
-                "work_dir": f"{self.output_dir}/temp_execution",
-                "use_docker": False,
-                "last_n_messages": 1,
-            },
-            human_input_mode="NEVER",
-            is_termination_msg=lambda x: (
-                x.get("content", "").rstrip().endswith("TERMINATE") or
-                "final implementation" in x.get("content", "").lower()
-            ),
-            system_message="""
-You are a code execution coordinator for research implementations.
-
-Your role is to:
-1. Execute code provided by the Engineer using built-in code execution
-2. Validate imports and basic functionality
-3. Report execution results to help improve the implementation
-4. Coordinate the feedback loop between Engineer and Critic
-5. Determine when the implementation is ready
-
-When code is provided, test it and report:
-- Whether it executes without errors
-- Import validation results
-- Any runtime issues or exceptions
-- Basic functionality verification
-
-Keep responses concise and focused on execution results.
-            """.strip()
-        )
-        
-        # Group Chat Setup
-        self.group_chat = GroupChat(
-            agents=[self.user_proxy, self.engineer, self.critic],
-            messages=[],
-            max_round=12,
-            speaker_selection_method="round_robin",
-        )
-        
-        # Group Chat Manager
-        self.manager = GroupChatManager(
-            groupchat=self.group_chat,
-            llm_config={
-                "config_list": self.autogen_config,
-                "cache_seed": self.cache_seed,
-            },
-            system_message="""
-You are a project manager coordinating research implementation between an Engineer and Critic.
-
-Your role is to:
-1. Ensure the Engineer produces code that matches requirements and analysis
-2. Facilitate thorough code review by the Critic
-3. Guide iterative improvement until quality standards are met
-4. Decide when the implementation is ready
-
-Success criteria:
-- Code implements the research methodology correctly
-- Follows software engineering best practices
-- Passes code review with scores >= 7 in all dimensions
-- Executes without critical errors
-
-Orchestrate the conversation efficiently to achieve high-quality research implementations.
-            """.strip()
-        )
-    
-    def generate_file_with_autogen(self, file_info: Tuple[str, str, str], 
-                                   shared_context: Dict[str, str]) -> Dict[str, Any]:
-        """Generate a single file using AutoGen multi-agent collaboration"""
-        
-        filename, detailed_analysis, utility_description = file_info
-        
-        print(f"\n[AUTOGEN] Starting collaborative implementation: {filename}")
-        print(f"   Expected utility: {utility_description[:100]}{'...' if len(utility_description) > 100 else ''}")
-        
-        try:
-            # Build context of previously implemented files (same as your approach)
-            code_files = ""
-            for done_file in self.done_files:
-                if done_file.endswith(".yaml"):
-                    continue
-                if done_file in self.done_file_dict:
-                    code_files += f"""
-### {done_file}
-```python
-{self.done_file_dict[done_file][:800]}{'...' if len(self.done_file_dict[done_file]) > 800 else ''}
-```
-
-"""
-            
-            # Create comprehensive implementation prompt
-            implementation_prompt = f"""# AutoGen Implementation Task: {filename}
-
-## Expected Utility Value
-{utility_description}
-
-## Research Paper Context (Key Sections)
-{shared_context['paper_content'][:2000]}...
-
-## Configuration
-```yaml
-{shared_context['config_yaml'][:1000]}{'...' if len(shared_context['config_yaml']) > 1000 else ''}
-```
-
-## Architecture Context
-{shared_context['context_architecture'][:1500]}{'...' if len(shared_context['context_architecture']) > 1500 else ''}
-
-## Code Structure
-{shared_context['context_code_structure'][:1500]}{'...' if len(shared_context['context_code_structure']) > 1500 else ''}
-
-## Detailed Analysis for {filename}
-{detailed_analysis}
-
-## Previously Implemented Files
-{code_files}
-
----
-
-**AUTOGEN COLLABORATION TASK**: Implement `{filename}` based on the research methodology and analysis above.
-
-**SUCCESS CRITERIA**:
-- Delivers the expected utility value as specified
-- Follows UML design and architecture specifications
-- Includes proper docstrings, type hints, and error handling
-- Executes without critical errors
-- Integrates properly with existing codebase
-
-**DELIVERABLE**: Complete implementation of {filename} as executable Python code."""
-            
-            # Start AutoGen conversation with caching
-            with Cache.disk(cache_seed=self.cache_seed) as cache:
-                conversation_result = self.user_proxy.initiate_chat(
-                    recipient=self.manager,
-                    message=implementation_prompt,
-                    cache=cache,
-                )
-            
-            # Extract the final implementation from conversation
-            final_code = self._extract_final_code(conversation_result.chat_history, filename)
-            
-            # Validate the final implementation
-            validation_result = self.evaluator.execute_code(final_code, filename)
-            import_result = self.evaluator.validate_imports(final_code)
-            
-            # Save conversation and artifacts (compatible with your structure)
-            self._save_autogen_artifacts(filename, conversation_result.chat_history, final_code, utility_description)
-            
-            # Create structured response format (compatible with your structured responses)
-            structured_data = self._create_structured_response(
-                filename, final_code, utility_description, detailed_analysis, conversation_result.chat_history
-            )
-            
-            # Create diff and save to repository (same as your approach)
-            diff_path = self._create_diff_file(filename, final_code)
-            self._save_to_repository(filename, final_code)
-            
-            return {
-                'filename': filename,
-                'success': True,
-                'code': final_code,
-                'diff_path': diff_path,
-                'conversation_length': len(conversation_result.chat_history),
-                'validation': validation_result,
-                'imports': import_result,
-                'utility': utility_description,
-                'deliberation': self._extract_deliberation(conversation_result.chat_history),
-                'structured_data': structured_data,
-                'autogen_artifacts': f"{self.output_dir}/autogen_artifacts/{filename.replace('/', '_')}_conversation.json"
-            }
-            
-        except Exception as e:
-            print(f"❌ AutoGen error for {filename}: {e}")
-            return {
-                'filename': filename,
-                'success': False,
-                'error': str(e),
-                'diff_path': None
-            }
-    
-    def _extract_final_code(self, chat_history: List[Dict], filename: str) -> str:
-        """Extract the final implementation code from conversation history"""
-        
-        # Look for the most recent complete Python code block from the Engineer
-        for message in reversed(chat_history):
-            if message.get('name') == 'Engineer':
-                content = message.get('content', '')
-                
-                # Look for Python code blocks
-                import re
-                code_blocks = re.findall(r'```python\n(.*?)\n```', content, re.DOTALL)
-                
-                if code_blocks:
-                    return code_blocks[-1].strip()  # Return the last code block
-                
-                # Fallback: look for filename header
-                if f"# {filename}" in content:
-                    return content.split(f"# {filename}", 1)[1].strip()
-        
-        # If no code found, return a placeholder
-        return f"# {filename}\n# Implementation not found in conversation"
-    
-    def _create_structured_response(self, filename: str, code: str, utility: str, 
-                                   analysis: str, chat_history: List[Dict]) -> Dict[str, Any]:
-        """Create structured response compatible with your existing format"""
-        
-        deliberation = self._extract_deliberation(chat_history)
-        
-        # Format as diff content (compatible with your diff approach)
-        diff_content = f"""--- /dev/null
-+++ {filename}
-@@ -0,0 +1,{len(code.split(chr(10)))} @@
-+{code.replace(chr(10), chr(10) + '+')}
-"""
-        
-        return {
-            "deliberation": deliberation,
-            "utility": utility,
-            "files": [{
-                "file_name": filename,
-                "diff_file": diff_content
-            }]
-        }
-    
-    def _extract_deliberation(self, chat_history: List[Dict]) -> str:
-        """Extract reasoning and deliberation from AutoGen conversation"""
-        
-        deliberations = []
-        
-        for message in chat_history:
-            if message.get('name') == 'Engineer':
-                content = message.get('content', '')
-                if any(keyword in content.lower() for keyword in ['approach', 'design', 'implementation', 'reasoning']):
-                    deliberations.append(f"Engineer: {content[:300]}{'...' if len(content) > 300 else ''}")
-            
-            elif message.get('name') == 'Critic':
-                content = message.get('content', '')
-                if 'recommendations' in content.lower() or 'feedback' in content.lower():
-                    deliberations.append(f"Critic: {content[:300]}{'...' if len(content) > 300 else ''}")
-        
-        if deliberations:
-            return "\n\n".join(deliberations)
-        else:
-            return "AutoGen collaborative implementation with multi-agent feedback and refinement."
-    
-    def _save_autogen_artifacts(self, filename: str, chat_history: List[Dict], 
-                               final_code: str, utility_description: str):
-        """Save AutoGen conversation and artifacts (compatible with your existing structure)"""
-        
-        safe_filename = filename.replace("/", "_").replace("\\", "_")
-        
-        # Save conversation history
-        conversation_path = f"{self.output_dir}/autogen_artifacts/{safe_filename}_conversation.json"
-        with open(conversation_path, 'w') as f:
-            json.dump(chat_history, f, indent=2)
-        
-        # Save final code
-        code_path = f"{self.output_dir}/autogen_artifacts/{safe_filename}_final_code.py"
-        with open(code_path, 'w') as f:
-            f.write(final_code)
-        
-        # Save full response (compatible with your coding_artifacts structure)
-        full_response_path = f"{self.output_dir}/coding_artifacts/{safe_filename}_coding.txt"
-        with open(full_response_path, 'w') as f:
-            f.write(f"AutoGen Collaborative Implementation\n")
-            f.write(f"{'='*50}\n\n")
-            f.write(f"File: {filename}\n")
-            f.write(f"Utility: {utility_description}\n\n")
-            f.write(f"Conversation Summary:\n")
-            f.write(f"Messages: {len(chat_history)}\n\n")
-            f.write(f"Final Code:\n")
-            f.write(f"{'='*30}\n")
-            f.write(final_code)
-        
-        # Save deliberation and utility (compatible with your format)
-        deliberation = self._extract_deliberation(chat_history)
-        deliberation_path = f"{self.output_dir}/coding_artifacts/{safe_filename}_deliberation.txt"
-        with open(deliberation_path, 'w') as f:
-            f.write(f"DELIBERATION:\n{deliberation}\n\nUTILITY:\n{utility_description}")
-        
-        # Save structured response (compatible with your structured_code_responses)
-        structured_data = self._create_structured_response(filename, final_code, utility_description, "", chat_history)
-        structured_path = f"{self.output_dir}/structured_code_responses/{safe_filename}_structured.json"
-        with open(structured_path, 'w') as f:
-            json.dump(structured_data, f, indent=2)
-        
-        print(f"✅ Saved AutoGen artifacts for {filename}")
-    
-    def _create_diff_file(self, filename: str, code: str) -> str:
-        """Create a diff file for the generated code"""
-        diff_content = f"""--- /dev/null
-+++ {filename}
-@@ -0,0 +1,{len(code.split(chr(10)))} @@
-+{code.replace(chr(10), chr(10) + '+')}
-"""
-        
-        safe_filename = filename.replace("/", "_").replace("\\", "_")
-        diff_path = f"{self.output_dir}/diffs/{safe_filename}.diff"
-        
-        with open(diff_path, 'w') as f:
-            f.write(diff_content)
-        
-        return diff_path
-    
-    def _save_to_repository(self, filename: str, code: str):
-        """Save the code to the output repository"""
-        
-        # Create directory structure if needed
-        if "/" in filename:
-            file_dir = '/'.join(filename.split("/")[:-1])
-            os.makedirs(f"{self.output_repo_dir}/{file_dir}", exist_ok=True)
-        
-        # Write the code file
-        with open(f"{self.output_repo_dir}/{filename}", 'w') as f:
-            f.write(code)
-        
-    def process_files_sequential(self, file_tasks: List[Tuple[str, str, str]], 
+    def process_files_sequential(self, file_tasks: List[Tuple[str, str]], 
                                 shared_context: Dict[str, str]) -> List[Dict[str, Any]]:
-        """Process files sequentially using AutoGen with RESUME capability"""
+        """Process files sequentially for whiteboard consistency"""
         
-        print(f"\n🔄 Checking for existing AutoGen generated files...")
+        results = []
         
-        # Filter out already-completed files and load them into context
-        remaining_tasks = []
-        completed_results = []
-        
-        for file_info in file_tasks:
-            filename, detailed_analysis, utility_description = file_info
+        for filename, description in file_tasks:
+            print(f"\n[CODING] {filename}")
+            print(f"   Purpose: {description}")
             
-            # Check if file already exists in repository
-            repo_file_path = f"{self.output_repo_dir}/{filename}"
-            safe_filename = filename.replace("/", "_").replace("\\", "_")
-            
-            # Check for all required AutoGen artifacts
-            structured_response_path = f"{self.output_dir}/structured_code_responses/{safe_filename}_structured.json"
-            diff_path = f"{self.output_dir}/diffs/{safe_filename}.diff"
-            coding_artifact_path = f"{self.output_dir}/coding_artifacts/{safe_filename}_coding.txt"
-            autogen_conversation_path = f"{self.output_dir}/autogen_artifacts/{safe_filename}_conversation.json"
-            
-            if (os.path.exists(repo_file_path) and 
-                os.path.exists(structured_response_path) and 
-                os.path.exists(diff_path) and 
-                os.path.exists(coding_artifact_path) and
-                os.path.exists(autogen_conversation_path)):
+            try:
+                # Convert to format expected by generate_single_file
+                file_info = (filename, description, description)  # (filename, analysis, utility)
                 
-                print(f"   ✅ Found existing AutoGen: {filename}")
-                
-                # Load existing code into context for subsequent files
-                try:
-                    with open(repo_file_path, 'r') as f:
-                        existing_code = f.read()
-                    self.done_files.append(filename)
-                    self.done_file_dict[filename] = existing_code
-                    
-                    # Load existing structured data for result compatibility
-                    with open(structured_response_path, 'r') as f:
-                        structured_data = json.load(f)
-                    
-                    # Load conversation length from AutoGen artifacts
-                    conversation_length = 0
-                    try:
-                        with open(autogen_conversation_path, 'r') as f:
-                            conversation_data = json.load(f)
-                            conversation_length = len(conversation_data)
-                    except:
-                        conversation_length = 0
-                    
-                    # Create result entry for completed AutoGen file
-                    completed_results.append({
-                        'filename': filename,
-                        'success': True,
-                        'code': existing_code,
-                        'diff_path': diff_path,
-                        'conversation_length': conversation_length,
-                        'validation': {'success': True, 'note': 'Previously completed'},  # Assume success for existing
-                        'imports': {'imports_valid': True, 'note': 'Previously completed'},
-                        'utility': structured_data.get('utility', utility_description),
-                        'deliberation': structured_data.get('deliberation', 'Previously completed by AutoGen'),
-                        'structured_data': structured_data,
-                        'autogen_artifacts': autogen_conversation_path,
-                        'resumed': True  # Flag to indicate this was resumed
-                    })
-                    
-                except Exception as e:
-                    print(f"   ⚠️  Error loading existing AutoGen {filename}: {e}")
-                    print(f"      Will regenerate with AutoGen...")
-                    remaining_tasks.append(file_info)
-            else:
-                remaining_tasks.append(file_info)
-        
-        if completed_results:
-            print(f"📂 AutoGen Resuming: {len(completed_results)} files already completed")
-            print(f"🔄 AutoGen Remaining: {len(remaining_tasks)} files to generate")
-            
-            for result in completed_results:
-                print(f"   - {result['filename']} (loaded, {result['conversation_length']} msgs)")
-        else:
-            print(f"🆕 AutoGen Starting fresh: {len(remaining_tasks)} files to generate")
-        
-        # If no remaining tasks, return completed results
-        if not remaining_tasks:
-            print("\n✅ All AutoGen files already completed!")
-            return completed_results
-        
-        # Process remaining files sequentially with AutoGen
-        print(f"\n🤖 Starting AutoGen collaborative coding for {len(remaining_tasks)} remaining files")
-        print("   Processing sequentially for optimal agent collaboration...")
-        
-        new_results = []
-        
-        try:
-            for i, file_info in enumerate(remaining_tasks, 1):
-                filename, detailed_analysis, utility_description = file_info
-                print(f"\n[{i}/{len(remaining_tasks)}] AutoGen Processing: {filename}")
-                print(f"   Expected utility: {utility_description[:80]}{'...' if len(utility_description) > 80 else ''}")
-                
-                result = self.generate_file_with_autogen(file_info, shared_context)
-                new_results.append(result)
+                # Generate the file
+                result = self.generate_single_file(file_info, shared_context)
+                results.append(result)
                 
                 if result['success']:
-                    # Update shared state for subsequent files
-                    self.done_files.append(result['filename'])
-                    self.done_file_dict[result['filename']] = result['code']
-                    print(f"   ✅ Success: {filename}")
-                    print(f"      Conversation: {result['conversation_length']} messages")
-                    print(f"      Validation: {'PASS' if result['validation']['success'] else 'FAIL'}")
-                    print(f"      Imports: {'VALID' if result['imports']['imports_valid'] else 'INVALID'}")
+                    print(f"   ✅ Generated {filename} ({len(result['code'])} chars)")
+                    if result.get('whiteboard_updates', 0) > 0:
+                        print(f"   📝 Applied {result['whiteboard_updates']} whiteboard updates")
                 else:
-                    print(f"   ❌ Failed: {filename} - {result.get('error', 'Unknown error')}")
-                
-                # Brief pause between files to avoid API rate limits
-                if i < len(remaining_tasks):
-                    time.sleep(2)
+                    print(f"   ❌ Failed: {result.get('error', 'Unknown error')}")
                     
-        except KeyboardInterrupt:
-            print(f"\n⚠️  AutoGen KeyboardInterrupt received!")
-            print(f"📊 AutoGen Progress before interruption:")
-            print(f"   - Completed before resume: {len(completed_results)}")
-            print(f"   - Generated in this session: {len(new_results)}")
-            print(f"   - Remaining: {len(remaining_tasks) - len(new_results)}")
-            print(f"\n💡 You can resume AutoGen by running the same command again.")
-            print(f"   Already completed AutoGen files will be detected and skipped.")
-            
-            # Re-raise to maintain normal Ctrl-C behavior
-            raise
+            except Exception as e:
+                print(f"   ❌ Exception generating {filename}: {e}")
+                results.append({
+                    'filename': filename,
+                    'success': False,
+                    'error': str(e)
+                })
         
-        # Combine completed and new results
-        all_results = completed_results + new_results
-        
-        # Print AutoGen summary
-        resumed_count = len([r for r in all_results if r.get('resumed', False)])
-        new_count = len([r for r in all_results if not r.get('resumed', False)])
-        
-        if resumed_count > 0:
-            print(f"\n📊 AutoGen Final Summary:")
-            print(f"   - Resumed existing: {resumed_count}")
-            print(f"   - Generated new: {new_count}")
-            print(f"   - Total: {len(all_results)}")
-            print(f"   - Total conversations: {sum(r.get('conversation_length', 0) for r in all_results)}")
-        
-        return all_results
+        return results
 
-
-# Add this function to replace your existing run_coding_phase
-def run_autogen_coding_phase(paper_content: str, output_dir: str, output_repo_dir: str,
-                            api_client: APIClient, coding_model: str, 
-                            development_order: List[str] = None, 
-                            cache_seed: int = 42) -> List[Dict[str, Any]]:
-    """Enhanced coding phase using AutoGen that replaces your existing run_coding_phase"""
-    
-    print("\n" + "="*60)
-    print("🤖 AUTOGEN ENHANCED CODING PHASE")
-    print("="*60)
-    print("   Multi-agent collaboration: Engineer + Critic + CodeExecutor + Manager")
-    print("   Real-time code validation and iterative improvement")
-    print("   Compatible with existing pipeline structure and outputs")
-    
-    # Check if structured responses exist (same as your original)
-    if not os.path.exists(f'{output_dir}/all_structured_responses.json'):
-        print("❌ No structured responses found. Run planning and analysis phases first.")
-        return []
-    
-    # Check if config exists (same as your original)
-    if not os.path.exists(f'{output_dir}/planning_config.yaml'):
-        print("❌ No config file found. Run planning phase first.")
-        return []
-    
-    # Load config (same as your original)
-    with open(f'{output_dir}/planning_config.yaml') as f:
-        config_yaml = f.read()
-    
-    # Load context and analysis (using your existing function)
-    context, detailed_logic_analysis_dict, utility_descriptions = load_context_and_analysis(output_dir)
-    
-    # Use development order if provided, otherwise use original task list (same as your original)
-    if development_order:
-        ordered_files = [f for f in development_order if f != "config.yaml"]
-        print(f"\n📝 Using AutoGen with development order ({len(ordered_files)} files):")
-    else:
-        ordered_files = [f for f in context['task_list'] if f != "config.yaml"]
-        print(f"\n📝 Using AutoGen with original task order ({len(ordered_files)} files):")
-    
-    for i, filename in enumerate(ordered_files, 1):
-        utility = utility_descriptions.get(filename, f"Core implementation for {filename}")
-        print(f"   {i}. {filename}")
-        print(f"      └─ {utility[:60]}{'...' if len(utility) > 60 else ''}")
-    
-    # Prepare file tasks with utility descriptions using development order (same structure as your original)
-    file_tasks = [
-        (filename, detailed_logic_analysis_dict[filename], utility_descriptions.get(filename, f"Core implementation for {filename}"))
-        for filename in ordered_files
-        if filename in detailed_logic_analysis_dict
-    ]
-    
-    if not file_tasks:
-        print("❌ No files to generate")
-        return []
-    
-    # Prepare shared context (same as your original)
-    shared_context = {
-        'paper_content': paper_content,
-        'config_yaml': config_yaml,
-        'context_plan': context['context_plan'],
-        'context_six_hats': context['context_six_hats'],
-        'context_architecture': context['context_architecture'],
-        #'context_uml': context['context_uml'],
-        'context_code_structure': context['context_code_structure'],
-        'context_tasks': context['context_tasks']
-    }
-    
-    # Initialize AutoGen coding pipeline (using AutoGen instead of regular CodingPipeline)
-    autogen_pipeline = AutoGenCodingPipeline(
-        api_client=api_client,
-        coding_model=coding_model,
-        output_dir=output_dir,
-        output_repo_dir=output_repo_dir,
-        cache_seed=cache_seed
-    )
-    
-    # Process files sequentially using AutoGen
-    results = autogen_pipeline.process_files_sequential(file_tasks, shared_context)
-    
-    # Copy config file to output repo (same as your original)
-    shutil.copy(f'{output_dir}/planning_config.yaml', f'{output_repo_dir}/config.yaml')
-    
-    # Generate enhanced summary (adapted from your original with AutoGen additions)
-    successful = [r for r in results if r['success']]
-    failed = [r for r in results if not r['success']]
-    
-    print(f"\n" + "="*60)
-    print("✅ AutoGen collaborative coding completed!")
-    print(f"📊 Results: {len(successful)} successful, {len(failed)} failed")
-    print(f"📁 Repository: {output_repo_dir}")
-    print(f"🤖 Conversation logs: {output_dir}/autogen_artifacts/")
-    print(f"📄 Diff files: {output_dir}/diffs/")
-    
-    if successful:
-        print(f"\n✅ AutoGen generated files with multi-agent collaboration:")
-        for result in successful:
-            print(f"   - {result['filename']}")
-            if 'validation' in result:
-                status = "✅ PASS" if result['validation']['success'] else "❌ FAIL"
-                print(f"     └─ Execution: {status}")
-            if 'conversation_length' in result:
-                print(f"     └─ Conversation: {result['conversation_length']} messages")
-    
-    if failed:
-        print(f"\n❌ Failed files:")
-        for result in failed:
-            print(f"   - {result['filename']}: {result.get('error', 'Unknown error')}")
-    
-    # Generate enhanced results summary (enhanced from your original)
-    results_summary = {
-        'total_files': len(file_tasks),
-        'successful': len(successful),
-        'failed': len(failed),
-        'autogen_enhanced': True,
-        'development_order_used': development_order is not None,
-        'cache_seed': cache_seed,
-        'results': results,
-        'conversation_logs': [r.get('autogen_artifacts', '') for r in successful if 'autogen_artifacts' in r],
-        'diff_files': [r['diff_path'] for r in successful if r.get('diff_path')],
-        'validation_summary': {
-            'passed': len([r for r in successful if r.get('validation', {}).get('success', False)]),
-            'failed': len([r for r in successful if not r.get('validation', {}).get('success', True)])
-        }
-    }
-    
-    with open(f"{output_dir}/autogen_coding_results.json", 'w') as f:
-        json.dump(results_summary, f, indent=2)
-    
-    return results
-    
-
+# Add PipelineConfig class with whiteboard integration
 class PipelineConfig:
-    """Centralized pipeline configuration and stage management"""
+    """Centralized pipeline configuration and stage management with whiteboard support"""
     
     # Define the pipeline stages and their dependencies
     STAGES = {
@@ -2195,7 +1757,7 @@ class PipelineConfig:
             'prompt_func': 'get_analysis_prompt'
         },
         'file_organization': {
-            'dependencies': ['task_list'],  # Only needs task list and analysis summaries
+            'dependencies': ['task_list'],
             'schema': 'FILE_ORGANIZATION_SCHEMA',
             'model': 'reasoning',
             'prompt_func': 'get_file_organization_prompt'
@@ -2222,6 +1784,7 @@ class PipelineConfig:
         """Get prompt function name for stage"""
         return cls.STAGES.get(stage_name, {}).get('prompt_func')
     
+    #TODO: Archived replaced by whiteboard, not used
     @classmethod
     def build_context_for_stage(cls, stage_name: str, structured_responses: Dict[str, Any]) -> Dict[str, str]:
         """Build context dictionary for a stage based on its dependencies"""
@@ -2236,7 +1799,8 @@ class PipelineConfig:
                 )
         
         return context
-    
+
+    #TODO: Archived replaced by whiteboard, not used
     @classmethod
     def get_prompt_args(cls, stage_name: str, paper_content: str, structured_responses: Dict[str, Any], 
                        **extra_args) -> List:
@@ -2257,3 +1821,241 @@ class PipelineConfig:
             args.append(value)
         
         return args
+        
+def load_generated_code_files(repo_dir: str, prefix: str = '') -> str:
+    """Load generated files with optional prefix filtering"""
+    if not os.path.exists(repo_dir):
+        return "No generated files found."
+    
+    files = []
+    for filename in os.listdir(repo_dir):
+        if filename.startswith(prefix) and (filename.endswith('.py') or filename.endswith('.yaml')):
+            try:
+                with open(f"{repo_dir}/{filename}", 'r') as f:
+                    files.append(f"## {filename}\n```python\n{f.read()}\n```")
+            except Exception as e:
+                print(f"Warning: Error reading {filename}: {e}")
+                
+    return '\n\n'.join(files) if files else f"No {prefix}* files found"
+
+def save_category_implementation(category: str, implementation: str, output_dir: str, output_repo_dir: str) -> None:
+    """Save category implementation directly to repository as corrected_*.py files."""
+    
+    # Still save JSON for debugging
+    os.makedirs(f"{output_dir}/iterative_refinements", exist_ok=True)
+    category_data = {
+        "category": category,
+        "implementation": implementation,
+        "timestamp": time.time()
+    }
+    json_filepath = f"{output_dir}/iterative_refinements/{category}.json"
+    with open(json_filepath, 'w') as f:
+        json.dump(category_data, f, indent=2)
+    
+    # WRITE ACTUAL PYTHON FILES TO REPO WITH CORRECTED_ PREFIX
+    if category == 'corrected_constants':
+        repo_file = f"{output_repo_dir}/corrected_constants.py"
+    elif category == 'corrected_imports':
+        repo_file = f"{output_repo_dir}/corrected_imports.py"  
+    elif category == 'corrected_functions':
+        repo_file = f"{output_repo_dir}/corrected_functions.py"
+    elif category == 'corrected_classes':
+        repo_file = f"{output_repo_dir}/corrected_classes.py"
+    elif category == 'corrected_main':
+        repo_file = f"{output_repo_dir}/corrected_main.py"
+    elif category == 'corrected_config':
+        repo_file = f"{output_repo_dir}/corrected_config.yaml"
+    else:
+        # Generic fallback - keep the full category name
+        filename = category + '.py'
+        repo_file = f"{output_repo_dir}/{filename}"
+    
+    # Write the actual implementation to the repo
+    try:
+        with open(repo_file, 'w') as f:
+            f.write(implementation)
+        print(f"✅ Saved {category} implementation to {repo_file}")
+        print(f"📝 Also saved debug JSON to {json_filepath}")
+    except Exception as e:
+        print(f"❌ Failed to write {repo_file}: {e}")
+        print(f"✅ Debug JSON still saved to {json_filepath}")
+        
+def compile_refinement_summary(output_dir: str) -> str:
+    """Generate a simple summary of what was refined (optional for debugging)."""
+    refinements_dir = f"{output_dir}/iterative_refinements"
+    
+    if not os.path.exists(refinements_dir):
+        return "No refinements found."
+    
+    summary = "# Refinement Summary\n\n"
+    categories = ['corrected_constants', 'corrected_imports', 'corrected_functions', 
+                 'corrected_classes', 'corrected_main', 'corrected_config']
+    
+    for category in categories:
+        filepath = f"{refinements_dir}/{category}.json"
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, 'r') as f:
+                    data = json.load(f)
+                items_completed = data.get('items_completed', [])
+                summary += f"## {category}\n"
+                summary += f"- Items: {len(items_completed)}\n"
+                summary += f"- Files: {', '.join(items_completed)}\n\n"
+            except:
+                continue
+    
+    # Optional: save summary (but not needed)
+    summary_path = f"{output_dir}/refinement_summary.md"
+    with open(summary_path, 'w') as f:
+        f.write(summary)
+    
+    return summary
+
+# Add to functions.py - File Translation System
+
+def create_file_mapping(classification_data: Dict[str, str], original_task_list: List[str]) -> Dict[str, str]:
+    """Create mapping from original PDR file names to consolidated 5-file structure"""
+    
+    mapping = {}
+    
+    for original_file in original_task_list:
+        if original_file == "config.yaml":
+            mapping[original_file] = "config.yaml"  # Keep as-is
+            continue
+            
+        # Default mapping rules based on file name patterns
+        if any(keyword in original_file.lower() for keyword in 
+               ['parse', 'parser', 'util', 'helper', 'process', 'validate']):
+            mapping[original_file] = "functions.py"
+        elif any(keyword in original_file.lower() for keyword in 
+                 ['class', 'model', 'transformer', 'encoder', 'agent', 'module']):
+            mapping[original_file] = "classes.py"
+        elif original_file == "main.py":
+            mapping[original_file] = "main.py"
+        elif any(keyword in original_file.lower() for keyword in 
+                 ['const', 'config', 'param', 'setting']):
+            mapping[original_file] = "constants.py"
+        elif any(keyword in original_file.lower() for keyword in 
+                 ['import', 'deps', 'depend']):
+            mapping[original_file] = "imports.py"
+        else:
+            # When in doubt: functions.py
+            mapping[original_file] = "functions.py"
+    
+    return mapping
+
+def translate_imports_in_main(main_code: str, file_mapping: Dict[str, str]) -> str:
+    """Translate import statements in main.py from original names to consolidated files"""
+    import re
+    
+    lines = main_code.split('\n')
+    translated_lines = []
+    
+    for line in lines:
+        # Match: from original_module import ...
+        import_match = re.match(r'from (\w+) import (.+)', line)
+        if import_match:
+            original_module = import_match.group(1)
+            imports = import_match.group(2)
+            
+            # Find what file this module was mapped to
+            original_file = f"{original_module}.py"
+            if original_file in file_mapping:
+                target_file = file_mapping[original_file]
+                target_module = target_file.replace('.py', '')
+                
+                # Translate the import
+                new_line = f"from {target_module} import {imports}"
+                translated_lines.append(new_line)
+            else:
+                # Keep original import (might be external library)
+                translated_lines.append(line)
+        else:
+            translated_lines.append(line)
+    
+    return '\n'.join(translated_lines)
+
+def update_coding_phase_with_translation():
+    """Show how to integrate translation into the coding phase"""
+    
+    # In run_coding_phase(), after classification:
+    """
+    # 1. Create file mapping
+    original_task_list = whiteboard_manager.load_whiteboard().get('knowledge', {}).get('task_list', [])
+    file_mapping = create_file_mapping(classification_data, original_task_list)
+    
+    # 2. Store mapping in whiteboard for correction phase
+    mapping_updates = [f"translation.file_mapping.{k.replace('.', '_')}={v}" 
+                      for k, v in file_mapping.items()]
+    whiteboard_manager.apply_updates(mapping_updates)
+    
+    # 3. After generating main.py, translate its imports
+    if result['filename'] == 'main.py' and result['success']:
+        translated_code = translate_imports_in_main(result['code'], file_mapping)
+        
+        # Write the translated version
+        with open(f"{output_repo_dir}/main.py", 'w') as f:
+            f.write(translated_code)
+        
+        result['code'] = translated_code
+    """
+
+def fix_gap_analysis_with_translation():
+    """Update gap analysis to use translated file names"""
+    
+    # In get_gap_analysis_prompt(), add file mapping context:
+    """
+    ## File Translation Mapping
+    The following files were consolidated:
+    {file_mapping_context}
+    
+    When referencing corrections, use the TRANSLATED file names:
+    - pql_parser.py → functions.py  
+    - table_encoder.py → classes.py
+    - etc.
+    """
+
+def fix_category_implementation_with_translation():
+    """Update category implementation to reference correct files"""
+    
+    # In get_category_implementation_prompt():
+    """
+    IMPORTANT: When implementing {category}, remember the file translations:
+    - All parser functions go in functions.py
+    - All encoder/transformer classes go in classes.py  
+    - All constants go in constants.py
+    - All imports go in imports.py
+    - Main orchestration goes in main.py
+    
+    Do NOT reference original file names like 'pql_parser.py' - 
+    everything is consolidated into the 5-file structure.
+    """
+
+# Example usage in the pipeline:
+def demonstrate_fix():
+    """Example of how this fixes the import issue"""
+    
+    # Original PDR files:
+    original_files = ["pql_parser.py", "table_encoder.py", "main.py"]
+    
+    # Classification mapping:
+    classification = {
+        "pql_parser.py": "functions.py",
+        "table_encoder.py": "classes.py", 
+        "main.py": "main.py"
+    }
+    
+    # Original main.py content:
+    original_main = """
+from pql_parser import parse_pql_query
+from table_encoder import TableInvariantEncoder
+    """
+    
+    # Translated main.py content:
+    translated_main = """
+from functions import parse_pql_query  
+from classes import TableInvariantEncoder
+    """
+    
+    print("Translation fixes the import mismatch!")
+    
