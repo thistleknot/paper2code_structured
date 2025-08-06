@@ -576,61 +576,282 @@ def run_coding_phase(paper_content: str, output_dir: str, output_repo_dir: str,
     
     return results
 
+def resume_refinement_from_round(
+    round_num: int,
+    new_convergence_threshold: int,
+    paper_content: str,
+    output_dir: str,
+    output_repo_dir: str,
+    api_client: APIClient,
+    reasoning_model: str,
+    whiteboard_manager: WhiteboardManager,
+    max_rounds: int = 3
+) -> Dict[str, Any]:
+    """Resume refinement from a specific round with new parameters."""
+    
+    print(f"\n{'='*60}")
+    print(f"🔄 RESUMING REFINEMENT FROM ROUND {round_num}")
+    print(f"{'='*60}")
+    print(f"   New convergence threshold: {new_convergence_threshold}")
+    print(f"   Max rounds: {max_rounds}")
+    
+    # Check if we have the necessary state to resume
+    whiteboard = whiteboard_manager.load_whiteboard()
+    
+    # Check for baseline snapshot
+    baseline_json = whiteboard.get('refinement', {}).get('baseline_snapshot', '{}')
+    if not baseline_json or baseline_json == '{}':
+        print("❌ No baseline snapshot found - cannot resume")
+        print("   Run full refinement phase first")
+        return {"success": False, "error": "No baseline snapshot"}
+    
+    # Check for Round 1 completion
+    round_1_completed = whiteboard.get('refinement', {}).get('round_1', {}).get('items_resolved', 0) > 0
+    if not round_1_completed and round_num > 1:
+        print(f"❌ Round 1 not completed - cannot resume from Round {round_num}")
+        return {"success": False, "error": "Round 1 not completed"}
+    
+    # Load existing corrected files and merge them for continuation
+    print(f"🔄 Merging Round {round_num-1} corrections into base files...")
+    
+    if round_num > 1:
+        merge_success = merge_corrected_files_for_next_round(
+            round_num=round_num-1,
+            output_repo_dir=output_repo_dir,
+            whiteboard_manager=whiteboard_manager
+        )
+        
+        if not merge_success:
+            print(f"❌ Failed to merge Round {round_num-1} corrections")
+            return {"success": False, "error": "Merge failed"}
+    
+    # Clear refinement completion flag to allow continuation
+    whiteboard_manager.apply_updates([
+        "refinement.multi_round.completed=",  # Delete completion flag
+        f"refinement.resumed_from_round={round_num}",
+        f"refinement.new_convergence_threshold={new_convergence_threshold}"
+    ])
+    
+    print(f"✅ Ready to resume refinement from Round {round_num}")
+    
+    # Continue refinement with new parameters
+    return run_iterative_refinement_phase_from_round(
+        start_round=round_num,
+        paper_content=paper_content,
+        output_dir=output_dir,
+        output_repo_dir=output_repo_dir,
+        api_client=api_client,
+        reasoning_model=reasoning_model,
+        whiteboard_manager=whiteboard_manager,
+        max_rounds=max_rounds,
+        convergence_threshold=new_convergence_threshold
+    )
+
 def run_iterative_refinement_phase(
-    paper_content: str,  # Add this
+    paper_content: str,
     output_dir: str, 
     output_repo_dir: str,
     api_client: APIClient, 
     reasoning_model: str,
+    whiteboard_manager: WhiteboardManager,
+    max_rounds: int = 3,
+    convergence_threshold: int = 2,  # Simple count, not percentage
+    min_improvement_threshold: int = 1  # Must resolve at least 1 item per round
+) -> Dict[str, Any]:
+    """Execute multi-round iterative refinement with simple counts only."""
+    
+    print("\n" + "="*60)
+    print("🔧 MULTI-ROUND ITERATIVE REFINEMENT")
+    print("="*60)
+    print(f"   Max rounds: {max_rounds}")
+    print(f"   Stop when ≤ {convergence_threshold} items remain")
+    print(f"   Must resolve ≥ {min_improvement_threshold} items per round")
+    
+    # Track refinement history
+    refinement_history = []
+    previous_remaining = None
+    
+    for round_num in range(1, max_rounds + 1):
+        print(f"\n{'='*60}")
+        print(f"🔄 REFINEMENT ROUND {round_num}/{max_rounds}")
+        print(f"{'='*60}")
+        
+        # Run single refinement round
+        round_result = run_single_refinement_round(
+            round_num=round_num,
+            paper_content=paper_content,
+            output_dir=output_dir,
+            output_repo_dir=output_repo_dir,
+            api_client=api_client,
+            reasoning_model=reasoning_model,
+            whiteboard_manager=whiteboard_manager
+        )
+        
+        if not round_result['success']:
+            print(f"❌ Round {round_num} failed: {round_result.get('error', 'Unknown error')}")
+            break
+            
+        # Track history
+        refinement_history.append(round_result)
+        current_remaining = round_result['remaining_total']
+        
+        print(f"\n📊 Round {round_num} Results:")
+        print(f"   - Items resolved this round: {round_result['items_resolved']}")
+        print(f"   - Items remaining: {current_remaining}")
+        
+        # Check convergence (very few items remaining)
+        if current_remaining <= convergence_threshold:
+            print(f"✅ Convergence achieved! Only {current_remaining} items remaining")
+            whiteboard_manager.apply_updates([
+                f"refinement.convergence.achieved=true",
+                f"refinement.convergence.round={round_num}",
+                f"refinement.convergence.remaining={current_remaining}"
+            ])
+            break
+        
+        # Check improvement (are we making progress?)
+        if previous_remaining is not None:
+            items_resolved_this_round = previous_remaining - current_remaining
+            
+            if items_resolved_this_round < min_improvement_threshold:
+                print(f"⚠️ Insufficient progress this round ({items_resolved_this_round} items resolved)")
+                print(f"   Stopping refinement to avoid wasted effort")
+                whiteboard_manager.apply_updates([
+                    f"refinement.stopped.reason=insufficient_progress",
+                    f"refinement.stopped.round={round_num}",
+                    f"refinement.stopped.items_resolved={items_resolved_this_round}"
+                ])
+                break
+        
+        # Prepare for next round (if not the last round)
+        if round_num < max_rounds and current_remaining > convergence_threshold:
+            print(f"\n🔄 Preparing for Round {round_num + 1}...")
+            merge_success = merge_corrected_files_for_next_round(
+                round_num=round_num,
+                output_repo_dir=output_repo_dir,
+                whiteboard_manager=whiteboard_manager
+            )
+            
+            if not merge_success:
+                print(f"❌ Failed to merge files for round {round_num + 1}")
+                break
+                
+            print(f"✅ Files merged, ready for Round {round_num + 1}")
+        
+        previous_remaining = current_remaining
+    
+    # Final summary with SIMPLE COUNTS ONLY
+    final_round = len(refinement_history)
+    if refinement_history:
+        final_result = refinement_history[-1]
+        
+        # Use baseline for all calculations - NO PERCENTAGES
+        initial_total = refinement_history[0]['initial_total']
+        final_remaining = final_result['remaining_total']
+        total_resolved = initial_total - final_remaining  # Simple subtraction
+        
+        print(f"\n🎯 Multi-Round Refinement Complete!")
+        print(f"   - Total rounds: {final_round}")
+        print(f"   - Initial deficiencies: {initial_total}")
+        print(f"   - Final remaining: {final_remaining}")
+        print(f"   - Total resolved: {total_resolved} out of {initial_total}")
+        
+        # Update whiteboard with final results - NO PERCENTAGES
+        whiteboard_manager.apply_updates([
+            f"refinement.multi_round.completed=true",
+            f"refinement.multi_round.total_rounds={final_round}",
+            f"refinement.multi_round.total_resolved={total_resolved}",
+            f"refinement.multi_round.final_remaining={final_remaining}",
+            f"refinement.multi_round.initial_total={initial_total}",
+            f"refinement.multi_round.summary={total_resolved} of {initial_total} deficiencies resolved"
+        ])
+        
+        return {
+            "success": True,
+            "total_rounds": final_round,
+            "total_resolved": total_resolved,
+            "final_remaining": final_remaining,
+            "initial_total": initial_total,
+            "summary": f"{total_resolved} of {initial_total} deficiencies resolved",
+            "history": refinement_history
+        }
+    else:
+        return {
+            "success": False,
+            "error": "No refinement rounds completed",
+            "total_rounds": 0
+        }
+
+def run_single_refinement_round(
+    round_num: int,
+    paper_content: str,
+    output_dir: str,
+    output_repo_dir: str,
+    api_client: APIClient,
+    reasoning_model: str,
     whiteboard_manager: WhiteboardManager
 ) -> Dict[str, Any]:
-    """Execute snapshot-based iterative refinement with proper comparison."""
+    """Execute a single refinement round with simple counts."""
     
-    # PHASE 1: Initial gap analysis and snapshot
-    print("\n" + "="*60)
-    print("🔍 INITIAL GAP ANALYSIS & SNAPSHOT")
-    print("="*60)
+    print(f"🔍 Gap Analysis for Round {round_num}")
     
-    current_code = load_generated_code_files(output_repo_dir)
-    initial_response = api_client.chat_completion(
-        model=reasoning_model,
-        messages=get_gap_analysis_prompt(
-            current_code_files=current_code,
-            whiteboard_yaml=whiteboard_manager.get_whiteboard_yaml()
-        ),
-        response_format=GAP_ANALYSIS_SCHEMA,
-        stream=True
-    )
+    # CRITICAL FIX: Use Round 1 baseline for comparison, not fresh analysis
+    if round_num == 1:
+        # Round 1: Fresh gap analysis to establish baseline
+        code_files = load_generated_code_files(output_repo_dir)
+        
+        initial_response = api_client.chat_completion(
+            model=reasoning_model,
+            messages=get_gap_analysis_prompt(
+                current_code_files=code_files,
+                whiteboard_yaml=whiteboard_manager.get_whiteboard_yaml()
+            ),
+            response_format=GAP_ANALYSIS_SCHEMA,
+            stream=True
+        )
+        
+        initial_gap_data = parse_structured_response(initial_response['choices'][0]['message']['content'])
+        initial_snapshot = initial_gap_data['undefined_items']
+        
+        # SAVE THE BASELINE for future rounds
+        whiteboard_manager.apply_updates([
+            f"refinement.baseline_snapshot={json.dumps(initial_snapshot)}"
+        ])
+        
+    else:
+        # Round 2+: Load the original baseline, don't create new problems
+        whiteboard = whiteboard_manager.load_whiteboard()
+        baseline_json = whiteboard.get('refinement', {}).get('baseline_snapshot', '{}')
+        if isinstance(baseline_json, str):
+            initial_snapshot = json.loads(baseline_json)
+        else:
+            initial_snapshot = baseline_json
+        
+        print(f"📸 Using Round 1 baseline snapshot (not creating new issues)")
     
-    initial_gap_data = parse_structured_response(initial_response['choices'][0]['message']['content'])
-    
-    # Create snapshot of specific deficiency lists
-    initial_snapshot = initial_gap_data['undefined_items']
     initial_total = sum(len(items) for items in initial_snapshot.values())
     
-    # Save snapshot to whiteboard
-    whiteboard_manager.apply_updates([
-        f"refinement.initial_snapshot={json.dumps(initial_snapshot)}",
-        f"refinement.initial_total={initial_total}"
-    ])
-    
-    print(f"📸 Snapshot created: {initial_total} total deficiencies")
+    print(f"📸 Round {round_num} Baseline: {initial_total} total deficiencies")
     for category, items in initial_snapshot.items():
         if items:
             print(f"   - {category}: {len(items)} items")
-
+    
     if initial_total == 0:
         print("✅ No gaps found - code appears complete!")
-        return {"success": True, "items_resolved": 0, "resolution_rate": 1.0}
-
-    # PHASE 2: Category Implementation (stays the same)
-    print("\n" + "="*60)
-    print("🔧 IMPLEMENTATION PHASE")
-    print("="*60)
+        return {
+            "success": True,
+            "round": round_num,
+            "items_resolved": 0,
+            "remaining_total": 0,
+            "initial_total": 0
+        }
+    
+    # Implementation phase with versioned file names
+    print(f"\n🔧 Implementation Phase - Round {round_num}")
     
     categories = {
         'functions': 'functions.py',
-        'classes': 'classes.py', 
+        'classes': 'classes.py',
         'constants': 'constants.py',
         'imports': 'imports.py',
         'main': 'main.py',
@@ -641,13 +862,12 @@ def run_iterative_refinement_phase(
     
     for category, target_file in categories.items():
         corrected_category = f"corrected_{category}"
-        items = initial_snapshot.get(corrected_category, [])
+        items = initial_snapshot.get(corrected_category, [])  # Use BASELINE items
         
         if not items:
-            print(f"⏭️ Skipping {category} - no items to implement") 
             continue
             
-        print(f"\n🛠️ Implementing {len(items)} {category} items...")
+        print(f"\n🛠️ Round {round_num}: Implementing {len(items)} {category} items...")
         
         # Generate corrections for this category
         response = api_client.chat_completion(
@@ -656,7 +876,7 @@ def run_iterative_refinement_phase(
                 category=corrected_category,
                 items_list=items,
                 whiteboard_yaml=whiteboard_manager.get_whiteboard_yaml(),
-                paper_content=paper_content if paper_content else ""  # Trim for context window
+                paper_content=paper_content[:2000] if paper_content else ""
             ),
             response_format=CATEGORY_IMPLEMENTATION_SCHEMA,
             stream=True
@@ -666,40 +886,49 @@ def run_iterative_refinement_phase(
         implemented = len(result.get('items_completed', []))
         items_implemented += implemented
         
-        # Save corrections to corrected_* file
-        corrected_path = f"{output_repo_dir}/corrected_{target_file}"
+        # Save to versioned corrected file
+        if round_num == 1:
+            corrected_filename = f"corrected_{target_file}"
+        else:
+            corrected_filename = f"corrected_v{round_num}_{target_file}"
+        
+        corrected_path = f"{output_repo_dir}/{corrected_filename}"
         with open(corrected_path, 'w') as f:
             f.write(result['implementation'])
             
-        print(f"✅ Saved {implemented} implementations to corrected_{target_file}")
-
-    # PHASE 3: Direct Snapshot Comparison  
-    print("\n" + "="*60)
-    print("📊 SNAPSHOT COMPARISON")
-    print("="*60)
+        print(f"✅ Round {round_num}: Saved {implemented} implementations to {corrected_filename}")
     
-    # Load corrected files
-    corrected_files = load_generated_code_files(output_repo_dir, prefix="corrected_")
+    # Final gap analysis against BASELINE, not expanded scope
+    current_files = load_generated_code_files(output_repo_dir)
+    if round_num == 1:
+        corrected_files = load_generated_code_files(output_repo_dir, prefix="corrected_")
+    else:
+        corrected_files = load_generated_code_files(output_repo_dir, prefix=f"corrected_v{round_num}_")
     
-    # Ask LLM to directly compare against original snapshot
+    # Create comparison prompt that focuses ONLY on the original baseline
     comparison_prompt = f"""
-    ## Original Deficiency Snapshot
+    ## Original Baseline Deficiencies (Round 1)
     {json.dumps(initial_snapshot, indent=2)}
     
-    ## Corrected Files  
+    ## Current + Corrected Implementation
+    {current_files}
+    
     {corrected_files}
     
     ## Task
-    Compare the corrected files against the original deficiency snapshot.
-    Return ONLY the remaining deficiencies that were NOT properly addressed in the corrected files.
+    Compare ONLY against the original baseline deficiencies above.
     
-    Use the same category structure as the original snapshot.
+    Return ONLY items from the original baseline that are STILL missing.
+    Do NOT add new categories or find new problems.
+    Do NOT expand scope beyond the original baseline.
+    
+    Focus only on: {list(initial_snapshot.keys())}
     """
     
     comparison_response = api_client.chat_completion(
         model=reasoning_model,
         messages=[
-            {"role": "system", "content": "You are analyzing code corrections against a deficiency snapshot."},
+            {"role": "system", "content": "You are comparing implementations against a fixed baseline. Do not add new deficiencies."},
             {"role": "user", "content": comparison_prompt}
         ],
         response_format=GAP_ANALYSIS_SCHEMA,
@@ -710,38 +939,396 @@ def run_iterative_refinement_phase(
     remaining_deficiencies = final_gap_data['undefined_items']
     remaining_total = sum(len(items) for items in remaining_deficiencies.values())
     
-    # Simple arithmetic
+    # Calculate results - SIMPLE COUNTS ONLY
     items_resolved = initial_total - remaining_total
-    resolution_rate = items_resolved / initial_total if initial_total > 0 else 1.0
     
-    print(f"\n🎯 Refinement Results:")
-    print(f" - Initial deficiencies: {initial_total}")
-    print(f" - Items implemented: {items_implemented}")
-    print(f" - Items resolved: {items_resolved}")
-    print(f" - Remaining deficiencies: {remaining_total}")
-    print(f" - Resolution rate: {resolution_rate:.1%}")
-    
-    # Show category breakdown
-    print(f"\n📋 Category Breakdown:")
-    for category in initial_snapshot.keys():
-        initial_count = len(initial_snapshot.get(category, []))
-        remaining_count = len(remaining_deficiencies.get(category, []))
-        resolved_count = initial_count - remaining_count
-        
-        if initial_count > 0:
-            print(f"   - {category}: {resolved_count}/{initial_count} resolved ({resolved_count/initial_count:.1%})")
+    # Update whiteboard with round results - NO PERCENTAGES
+    whiteboard_manager.apply_updates([
+        f"refinement.round_{round_num}.initial_total={initial_total}",
+        f"refinement.round_{round_num}.items_implemented={items_implemented}",
+        f"refinement.round_{round_num}.items_resolved={items_resolved}",
+        f"refinement.round_{round_num}.remaining_total={remaining_total}",
+        f"refinement.round_{round_num}.summary={items_resolved} of {initial_total} items resolved"
+    ])
     
     return {
         "success": True,
+        "round": round_num,
         "initial_total": initial_total,
         "items_implemented": items_implemented,
         "items_resolved": items_resolved,
         "remaining_total": remaining_total,
-        "resolution_rate": resolution_rate,
         "initial_snapshot": initial_snapshot,
-        "remaining_deficiencies": remaining_deficiencies,
-        "files_updated": [f for f in os.listdir(output_repo_dir) if f.startswith('corrected_')]
+        "remaining_deficiencies": remaining_deficiencies
     }
+
+
+def run_iterative_refinement_phase_from_round(
+    start_round: int,
+    paper_content: str,
+    output_dir: str,
+    output_repo_dir: str,
+    api_client: APIClient,
+    reasoning_model: str,
+    whiteboard_manager: WhiteboardManager,
+    max_rounds: int = 3,
+    convergence_threshold: int = 2,
+    min_improvement_threshold: int = 1
+) -> Dict[str, Any]:
+    """Run refinement starting from a specific round."""
+    
+    print(f"\n🔄 Continuing refinement from Round {start_round}")
+    
+    # Load previous history if resuming
+    refinement_history = []
+    if start_round > 1:
+        # Try to reconstruct history from whiteboard
+        whiteboard = whiteboard_manager.load_whiteboard()
+        for r in range(1, start_round):
+            round_data = whiteboard.get('refinement', {}).get(f'round_{r}', {})
+            if round_data:
+                refinement_history.append({
+                    'round': r,
+                    'initial_total': round_data.get('initial_total', 0),
+                    'items_resolved': round_data.get('items_resolved', 0),
+                    'remaining_total': round_data.get('remaining_total', 0),
+                    'success': True
+                })
+                print(f"📚 Loaded Round {r} history: {round_data.get('items_resolved', 0)} items resolved")
+    
+    previous_remaining = None
+    if refinement_history:
+        previous_remaining = refinement_history[-1]['remaining_total']
+        print(f"📊 Starting from: {previous_remaining} items remaining after Round {start_round-1}")
+    
+    # Continue refinement loop
+    for round_num in range(start_round, max_rounds + 1):
+        print(f"\n{'='*60}")
+        print(f"🔄 REFINEMENT ROUND {round_num}/{max_rounds}")
+        print(f"{'='*60}")
+        
+        # Run single refinement round
+        round_result = run_single_refinement_round(
+            round_num=round_num,
+            paper_content=paper_content,
+            output_dir=output_dir,
+            output_repo_dir=output_repo_dir,
+            api_client=api_client,
+            reasoning_model=reasoning_model,
+            whiteboard_manager=whiteboard_manager
+        )
+        
+        if not round_result['success']:
+            print(f"❌ Round {round_num} failed: {round_result.get('error', 'Unknown error')}")
+            break
+            
+        # Track history
+        refinement_history.append(round_result)
+        current_remaining = round_result['remaining_total']
+        
+        print(f"\n📊 Round {round_num} Results:")
+        print(f"   - Items resolved this round: {round_result['items_resolved']}")
+        print(f"   - Items remaining: {current_remaining}")
+        
+        # Check convergence with NEW threshold
+        if current_remaining <= convergence_threshold:
+            print(f"✅ Convergence achieved with new threshold! Only {current_remaining} items remaining")
+            whiteboard_manager.apply_updates([
+                f"refinement.convergence.achieved=true",
+                f"refinement.convergence.round={round_num}",
+                f"refinement.convergence.remaining={current_remaining}",
+                f"refinement.convergence.threshold_used={convergence_threshold}"
+            ])
+            break
+        
+        # Check improvement
+        if previous_remaining is not None:
+            items_resolved_this_round = previous_remaining - current_remaining
+            
+            if items_resolved_this_round < min_improvement_threshold:
+                print(f"⚠️ Insufficient progress this round ({items_resolved_this_round} items resolved)")
+                print(f"   Stopping refinement to avoid wasted effort")
+                break
+        
+        # Prepare for next round
+        if round_num < max_rounds and current_remaining > convergence_threshold:
+            print(f"\n🔄 Preparing for Round {round_num + 1}...")
+            merge_success = merge_corrected_files_for_next_round(
+                round_num=round_num,
+                output_repo_dir=output_repo_dir,
+                whiteboard_manager=whiteboard_manager
+            )
+            
+            if not merge_success:
+                print(f"❌ Failed to merge files for round {round_num + 1}")
+                break
+                
+            print(f"✅ Files merged, ready for Round {round_num + 1}")
+        
+        previous_remaining = current_remaining
+    
+    # Final summary
+    if refinement_history:
+        final_result = refinement_history[-1]
+        initial_total = refinement_history[0]['initial_total']
+        final_remaining = final_result['remaining_total']
+        total_resolved = initial_total - final_remaining
+        
+        print(f"\n🎯 Resumed Refinement Complete!")
+        print(f"   - Total rounds: {len(refinement_history)} (started from Round {start_round})")
+        print(f"   - Total resolved: {total_resolved} out of {initial_total}")
+        print(f"   - Final remaining: {final_remaining}")
+        
+        return {
+            "success": True,
+            "total_rounds": len(refinement_history),
+            "total_resolved": total_resolved,
+            "final_remaining": final_remaining,
+            "initial_total": initial_total,
+            "resumed_from_round": start_round,
+            "history": refinement_history
+        }
+    
+    return {"success": False, "error": "No rounds completed"}
+
+
+def run_single_refinement_round(
+    round_num: int,
+    paper_content: str,
+    output_dir: str,
+    output_repo_dir: str,
+    api_client: APIClient,
+    reasoning_model: str,
+    whiteboard_manager: WhiteboardManager
+) -> Dict[str, Any]:
+    """Execute a single refinement round with simple counts."""
+    
+    print(f"🔍 Gap Analysis for Round {round_num}")
+    
+    # CRITICAL FIX: Use Round 1 baseline for comparison, not fresh analysis
+    if round_num == 1:
+        # Round 1: Fresh gap analysis to establish baseline
+        code_files = load_generated_code_files(output_repo_dir)
+        
+        initial_response = api_client.chat_completion(
+            model=reasoning_model,
+            messages=get_gap_analysis_prompt(
+                current_code_files=code_files,
+                whiteboard_yaml=whiteboard_manager.get_whiteboard_yaml()
+            ),
+            response_format=GAP_ANALYSIS_SCHEMA,
+            stream=True
+        )
+        
+        initial_gap_data = parse_structured_response(initial_response['choices'][0]['message']['content'])
+        initial_snapshot = initial_gap_data['undefined_items']
+        
+        # SAVE THE BASELINE for future rounds
+        whiteboard_manager.apply_updates([
+            f"refinement.baseline_snapshot={json.dumps(initial_snapshot)}"
+        ])
+        
+    else:
+        # Round 2+: Load the original baseline, don't create new problems
+        whiteboard = whiteboard_manager.load_whiteboard()
+        baseline_json = whiteboard.get('refinement', {}).get('baseline_snapshot', '{}')
+        if isinstance(baseline_json, str):
+            initial_snapshot = json.loads(baseline_json)
+        else:
+            initial_snapshot = baseline_json
+        
+        print(f"📸 Using Round 1 baseline snapshot (not creating new issues)")
+    
+    initial_total = sum(len(items) for items in initial_snapshot.values())
+    
+    print(f"📸 Round {round_num} Baseline: {initial_total} total deficiencies")
+    for category, items in initial_snapshot.items():
+        if items:
+            print(f"   - {category}: {len(items)} items")
+    
+    if initial_total == 0:
+        print("✅ No gaps found - code appears complete!")
+        return {
+            "success": True,
+            "round": round_num,
+            "items_resolved": 0,
+            "remaining_total": 0,
+            "initial_total": 0
+        }
+    
+    # Implementation phase with versioned file names
+    print(f"\n🔧 Implementation Phase - Round {round_num}")
+    
+    categories = {
+        'functions': 'functions.py',
+        'classes': 'classes.py',
+        'constants': 'constants.py',
+        'imports': 'imports.py',
+        'main': 'main.py',
+        'config': 'config.yaml'
+    }
+    
+    items_implemented = 0
+    
+    for category, target_file in categories.items():
+        corrected_category = f"corrected_{category}"
+        items = initial_snapshot.get(corrected_category, [])  # Use BASELINE items
+        
+        if not items:
+            continue
+            
+        print(f"\n🛠️ Round {round_num}: Implementing {len(items)} {category} items...")
+        
+        # Generate corrections for this category
+        response = api_client.chat_completion(
+            model=reasoning_model,
+            messages=get_category_implementation_prompt(
+                category=corrected_category,
+                items_list=items,
+                whiteboard_yaml=whiteboard_manager.get_whiteboard_yaml(),
+                paper_content=paper_content[:2000] if paper_content else ""
+            ),
+            response_format=CATEGORY_IMPLEMENTATION_SCHEMA,
+            stream=True
+        )
+        
+        result = parse_structured_response(response['choices'][0]['message']['content'])
+        implemented = len(result.get('items_completed', []))
+        items_implemented += implemented
+        
+        # Save to versioned corrected file
+        if round_num == 1:
+            corrected_filename = f"corrected_{target_file}"
+        else:
+            corrected_filename = f"corrected_v{round_num}_{target_file}"
+        
+        corrected_path = f"{output_repo_dir}/{corrected_filename}"
+        with open(corrected_path, 'w') as f:
+            f.write(result['implementation'])
+            
+        print(f"✅ Round {round_num}: Saved {implemented} implementations to {corrected_filename}")
+    
+    # Final gap analysis against BASELINE, not expanded scope
+    current_files = load_generated_code_files(output_repo_dir)
+    if round_num == 1:
+        corrected_files = load_generated_code_files(output_repo_dir, prefix="corrected_")
+    else:
+        corrected_files = load_generated_code_files(output_repo_dir, prefix=f"corrected_v{round_num}_")
+    
+    # Create comparison prompt that focuses ONLY on the original baseline
+    comparison_prompt = f"""
+    ## Original Baseline Deficiencies (Round 1)
+    {json.dumps(initial_snapshot, indent=2)}
+    
+    ## Current + Corrected Implementation
+    {current_files}
+    
+    {corrected_files}
+    
+    ## Task
+    Compare ONLY against the original baseline deficiencies above.
+    
+    Return ONLY items from the original baseline that are STILL missing.
+    Do NOT add new categories or find new problems.
+    Do NOT expand scope beyond the original baseline.
+    
+    Focus only on: {list(initial_snapshot.keys())}
+    """
+    
+    comparison_response = api_client.chat_completion(
+        model=reasoning_model,
+        messages=[
+            {"role": "system", "content": "You are comparing implementations against a fixed baseline. Do not add new deficiencies."},
+            {"role": "user", "content": comparison_prompt}
+        ],
+        response_format=GAP_ANALYSIS_SCHEMA,
+        stream=True
+    )
+    
+    final_gap_data = parse_structured_response(comparison_response['choices'][0]['message']['content'])
+    remaining_deficiencies = final_gap_data['undefined_items']
+    remaining_total = sum(len(items) for items in remaining_deficiencies.values())
+    
+    # Calculate results - SIMPLE COUNTS ONLY
+    items_resolved = initial_total - remaining_total
+    
+    # Update whiteboard with round results - NO PERCENTAGES
+    whiteboard_manager.apply_updates([
+        f"refinement.round_{round_num}.initial_total={initial_total}",
+        f"refinement.round_{round_num}.items_implemented={items_implemented}",
+        f"refinement.round_{round_num}.items_resolved={items_resolved}",
+        f"refinement.round_{round_num}.remaining_total={remaining_total}",
+        f"refinement.round_{round_num}.summary={items_resolved} of {initial_total} items resolved"
+    ])
+    
+    return {
+        "success": True,
+        "round": round_num,
+        "initial_total": initial_total,
+        "items_implemented": items_implemented,
+        "items_resolved": items_resolved,
+        "remaining_total": remaining_total,
+        "initial_snapshot": initial_snapshot,
+        "remaining_deficiencies": remaining_deficiencies
+    }
+
+def merge_corrected_files_for_next_round(
+    round_num: int,
+    output_repo_dir: str,
+    whiteboard_manager: WhiteboardManager
+) -> bool:
+    """Merge corrected files into originals for next refinement round."""
+    
+    categories = ['functions.py', 'classes.py', 'constants.py', 'imports.py', 'main.py', 'config.yaml']
+    merged_count = 0
+    
+    for target_file in categories:
+        original_path = f"{output_repo_dir}/{target_file}"
+        
+        # Determine corrected file name based on round
+        if round_num == 1:
+            corrected_path = f"{output_repo_dir}/corrected_{target_file}"
+        else:
+            corrected_path = f"{output_repo_dir}/corrected_v{round_num}_{target_file}"
+        
+        # Skip if corrected file doesn't exist
+        if not os.path.exists(corrected_path):
+            continue
+            
+        try:
+            # Read original file
+            original_content = ""
+            if os.path.exists(original_path):
+                with open(original_path, 'r') as f:
+                    original_content = f.read()
+            
+            # Read corrected file
+            with open(corrected_path, 'r') as f:
+                corrected_content = f.read()
+            
+            # Merge: original + corrected (simple concatenation with separator)
+            separator = f"\n\n# ===== ROUND {round_num} ADDITIONS =====\n\n"
+            merged_content = original_content + separator + corrected_content
+            
+            # Write merged content back to original
+            with open(original_path, 'w') as f:
+                f.write(merged_content)
+            
+            merged_count += 1
+            print(f"   ✅ Merged {target_file} (added {len(corrected_content)} chars)")
+            
+        except Exception as e:
+            print(f"   ❌ Failed to merge {target_file}: {e}")
+            return False
+    
+    # Update whiteboard with merge information
+    whiteboard_manager.apply_updates([
+        f"refinement.round_{round_num}.merged_files={merged_count}",
+        f"refinement.round_{round_num}.merge_completed=true"
+    ])
+    
+    print(f"✅ Merged {merged_count} files for next refinement round")
+    return True
 
 def main():
     """Main execution function with whiteboard-based pipeline"""
@@ -828,6 +1415,12 @@ def main():
             print("❌ Cannot resume from refinement: Coding not complete")
             return
         print("🔄 Resuming from iterative refinement phase...")
+        skip_to_refinement = True
+    elif getattr(args, 'resume_refinement_from_round', None):
+        if not pipeline_state.get('coding_complete', False):
+            print("❌ Cannot resume refinement: Coding not complete")
+            return
+        print(f"🔄 Resuming refinement from Round {args.resume_refinement_from_round}...")
         skip_to_refinement = True
     elif hasattr(args, 'resume_from_coding') and args.resume_from_coding:
         if not pipeline_state['planning_complete']:
@@ -992,33 +1585,84 @@ def main():
     else:
         print(f"\n📂 Coding phase already completed, skipping...")
     
-    # Run iterative refinement phase (CONSOLIDATED - handles both skip_to_refinement and enable_iterative_refinement)
-    if ((getattr(args, 'enable_iterative_refinement', False) or skip_to_refinement) and 
-        not pipeline_state.get('refinement_complete', False)):
+    # Check if refinement should run (including parameter override)
+    should_run_refinement = False
+    refinement_reason = ""
+    
+    # Check if refinement is explicitly requested
+    if (getattr(args, 'enable_iterative_refinement', False) or 
+        skip_to_refinement or 
+        getattr(args, 'resume_refinement_from_round', None)):
+        
+        refinement_complete = pipeline_state.get('refinement_complete', False)
+        
+        if not refinement_complete:
+            should_run_refinement = True
+            refinement_reason = "not previously completed"
+        else:
+            # Check if user specified different parameters than defaults
+            user_threshold = getattr(args, 'convergence_threshold', None)
+            user_max_rounds = getattr(args, 'refinement_max_rounds', None)
+            
+            # If user explicitly set parameters, allow override
+            if user_threshold is not None or user_max_rounds is not None:
+                should_run_refinement = True
+                refinement_reason = f"parameter override (threshold={user_threshold}, max_rounds={user_max_rounds})"
+                print(f"🔄 Overriding completed refinement due to new parameters")
+                if user_threshold is not None:
+                    print(f"   New convergence threshold: {user_threshold}")
+                if user_max_rounds is not None:
+                    print(f"   New max rounds: {user_max_rounds}")
+    
+    # Run iterative refinement phase with parameter override support
+    if should_run_refinement:
         
         print(f"\n{'='*60}")
         print("🔧 ITERATIVE REFINEMENT PHASE")
         print(f"{'='*60}")
+        print(f"   Reason: {refinement_reason}")
         
         try:
-            refinement_result = run_iterative_refinement_phase(
-                paper_content=paper_content,  # Pass the paper content you already loaded
-                output_dir=args.output_dir,
-                output_repo_dir=args.output_repo_dir,
-                api_client=api_client,
-                reasoning_model=args.reasoning_model,
-                whiteboard_manager=whiteboard_manager
-            )
+            # Check if resuming from specific round
+            if getattr(args, 'resume_refinement_from_round', None):
+                refinement_result = resume_refinement_from_round(
+                    round_num=args.resume_refinement_from_round,
+                    new_convergence_threshold=getattr(args, 'convergence_threshold', 2),
+                    paper_content=paper_content,
+                    output_dir=args.output_dir,
+                    output_repo_dir=args.output_repo_dir,
+                    api_client=api_client,
+                    reasoning_model=args.reasoning_model,
+                    whiteboard_manager=whiteboard_manager,
+                    max_rounds=getattr(args, 'refinement_max_rounds', 3)
+                )
+            else:
+                # Regular refinement with custom parameters
+                refinement_result = run_iterative_refinement_phase(
+                    paper_content=paper_content,
+                    output_dir=args.output_dir,
+                    output_repo_dir=args.output_repo_dir,
+                    api_client=api_client,
+                    reasoning_model=args.reasoning_model,
+                    whiteboard_manager=whiteboard_manager,
+                    max_rounds=getattr(args, 'refinement_max_rounds', 3),
+                    convergence_threshold=getattr(args, 'convergence_threshold', 2)
+                )
                                     
             if refinement_result['success']:
-                resolution_rate = refinement_result.get('resolution_rate', 0.0)
-                print(f"🎯 Refinement achieved {resolution_rate:.1%} resolution rate")
-                print(f"   📊 {refinement_result.get('items_resolved', 0)}/{refinement_result.get('initial_total', 0)} deficiencies resolved")
+                # SIMPLE SUMMARY - NO PERCENTAGES
+                total_resolved = refinement_result.get('total_resolved', 0)
+                initial_total = refinement_result.get('initial_total', 0)
+                final_remaining = refinement_result.get('final_remaining', 0)
+                
+                print(f"🎯 Refinement completed!")
+                print(f"   📊 {total_resolved} out of {initial_total} deficiencies resolved")
+                print(f"   📊 {final_remaining} items still remaining")
                 
                 # Update pipeline state to mark refinement as complete
                 whiteboard_manager.apply_updates([
                     "pipeline.refinement.completed=true",
-                    f"pipeline.refinement.resolution_rate={resolution_rate}",
+                    f"pipeline.refinement.total_resolved={total_resolved}",
                     f"pipeline.refinement.completion_time={time.time()}"
                 ])
             else:
@@ -1027,8 +1671,9 @@ def main():
         except Exception as e:
             print(f"❌ Iterative refinement error: {e}")
     
-    elif pipeline_state.get('refinement_complete', False):
-        print(f"\n📂 Iterative refinement already completed")
+    elif pipeline_state.get('refinement_complete', False) and not should_run_refinement:
+        print(f"\n📂 Iterative refinement already completed with previous parameters")
+        print(f"💡 To re-run with different parameters, use: --convergence_threshold X --refinement_max_rounds Y")
     
     # AutoGen validation with whiteboard tracking
     if (getattr(args, 'enable_autogen_validation', False) and 
@@ -1099,3 +1744,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    
