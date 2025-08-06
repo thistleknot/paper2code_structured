@@ -16,7 +16,6 @@ try:
 except:
     enc = None
 
-
 class WhiteboardManager:
     """Manages persistent JSON whiteboard state with YAML formatting for LLM context"""
     
@@ -633,6 +632,14 @@ def setup_argument_parser() -> argparse.ArgumentParser:
                        help='Enable AutoGen validation phase after regular coding')
     parser.add_argument('--enable_iterative_refinement', action='store_true',
                        help='Enable TRIZ-based iterative refinement of generated code')
+    # Refinement resume options
+    parser.add_argument('--resume_refinement_from_round', type=int, default=None,
+                       help='Resume refinement from specific round (e.g., 2)')
+    parser.add_argument('--convergence_threshold', type=int, default=5,
+                       help='Stop refinement when this many items remain')
+    parser.add_argument('--refinement_max_rounds', type=int, default=3,
+                       help='Maximum refinement rounds')
+    
     return parser
 
 def check_pipeline_state(output_dir: str) -> Dict[str, bool]:
@@ -795,7 +802,48 @@ class APIClient:
         settings = {k: v for k, v in current.items() if k != "name"}
         settings["seed"] = self.current_seed
         return current["name"], settings
-    
+            
+    def _handle_streaming_response(self, response) -> str:
+        """Handle streaming response with external monitor"""
+        full_content = ""
+        monitor = StreamMonitor()
+        print(f"🔄 Streaming response...")
+        
+        try:
+            for line in response.iter_lines():
+                if line:
+                    line_text = line.decode('utf-8')
+                    if line_text.startswith('data: '):
+                        data_text = line_text[6:]
+                        if data_text.strip() == '[DONE]':
+                            break
+                        try:
+                            data = json.loads(data_text)
+                            if 'choices' in data and len(data['choices']) > 0:
+                                delta = data['choices'][0].get('delta', {})
+                                content = delta.get('content', '')
+                                if content:
+                                    print(content, end='', flush=True)
+                                    full_content += content
+                                    
+                                    # EXTERNAL MONITOR - check if we should continue
+                                    if not monitor.add_content(content):
+                                        print(f"\n⚠️ Stream terminated by monitor")
+                                        # RAISE EXCEPTION TO TRIGGER RETRY LOGIC
+                                        raise Exception("Stream terminated due to content corruption detected by monitor")
+                                        
+                        except json.JSONDecodeError:
+                            continue
+        except Exception as e:
+            if "Stream terminated due to content corruption" in str(e):
+                print(f"\n⚠️ Content corruption detected, triggering retry...")
+                raise  # Re-raise to trigger retry logic
+            else:
+                print(f"\n⚠️ Streaming error: {e}")
+            
+        print()
+        return full_content
+
     def chat_completion(self, model: str, messages: List[Dict],
                    response_format: Optional[Dict] = None,
                    timeout: int = None,
@@ -883,6 +931,17 @@ class APIClient:
                 else:
                     raise Exception(f"Request timed out after {max_retries} attempts ({timeout}s each)")
                     
+            except Exception as e:
+                # Check if this is a corruption-based stream termination
+                if "Stream terminated due to content corruption" in str(e):
+                    print(f"🚨 Content corruption detected on attempt {attempt + 1}")
+                    if attempt < max_retries - 1:
+                        print(f"🔄 Retrying with different generation settings to avoid corruption...")
+                        time.sleep(2)  # Brief pause before retry
+                        continue
+                    else:
+                        raise Exception(f"Content corruption persisted after {max_retries} attempts with different generation settings")
+                        
             except requests.exceptions.RequestException as e:
                 print(f"❌ API request failed on attempt {attempt + 1}: {e}")
                 if hasattr(e, 'response') and e.response is not None:
@@ -892,42 +951,6 @@ class APIClient:
                     time.sleep(2)
                 else:
                     raise
-
-    def _handle_streaming_response(self, response) -> str:
-        """Handle streaming response with external monitor"""
-        full_content = ""
-        monitor = StreamMonitor()
-        print(f"🔄 Streaming response...")
-        
-        try:
-            for line in response.iter_lines():
-                if line:
-                    line_text = line.decode('utf-8')
-                    if line_text.startswith('data: '):
-                        data_text = line_text[6:]
-                        if data_text.strip() == '[DONE]':
-                            break
-                        try:
-                            data = json.loads(data_text)
-                            if 'choices' in data and len(data['choices']) > 0:
-                                delta = data['choices'][0].get('delta', {})
-                                content = delta.get('content', '')
-                                if content:
-                                    print(content, end='', flush=True)
-                                    full_content += content
-                                    
-                                    # EXTERNAL MONITOR - check if we should continue
-                                    if not monitor.add_content(content):
-                                        print(f"\n⚠️ Stream terminated by monitor")
-                                        break
-                                        
-                        except json.JSONDecodeError:
-                            continue
-        except Exception as e:
-            print(f"\n⚠️ Streaming error: {e}")
-            
-        print()
-        return full_content
 
 class WhiteboardPipeline:
     """Manages the whiteboard-based planning pipeline execution"""
